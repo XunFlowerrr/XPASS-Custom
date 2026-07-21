@@ -66,7 +66,7 @@ def inference(train_dataset, val_dataset, test_dataset, args, device, model, eva
             print(f"No test samples for user {uid}, skipping.")
             continue
 
-        user_test_loader = DataLoader(user_test_ds, batch_size=batch_size, shuffle=False, num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+        user_test_loader = DataLoader(user_test_ds, batch_size=batch_size, shuffle=False, num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
         _, _, final_srocc, final_mse, final_ndcg, final_mae, final_ccc = evaluate(model, user_test_loader, device, PIAA=True)
 
         user_sroccs.append(final_srocc if final_srocc is not None else np.nan)
@@ -195,7 +195,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
             user_test_ds.data = datasets_dict[genre]['test'].data[datasets_dict[genre]['test'].data['user_id'] == uid].reset_index(drop=True)
             if len(user_test_ds) > 0:
                 test_loaders_dict[genre] = DataLoader(user_test_ds, batch_size=batch_size, shuffle=False,
-                                                       num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                                                       num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
                 total_test_samples += len(user_test_ds)
         if total_test_samples == 0:
             print(f"No test samples for user {uid}, skipping.")
@@ -297,7 +297,7 @@ def evaluate_pretrain_on_val_piaa(datasets_dict_user, args, device, backbone_dic
         user_val_ds.data = datasets_dict_user[genre]['val'].data[datasets_dict_user[genre]['val'].data['user_id'] == uid].reset_index(drop=True)
         if len(user_val_ds) > 0:
             val_loaders_dict = {genre: DataLoader(user_val_ds, batch_size=batch_size, shuffle=False,
-                                                   num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)}
+                                                   num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
             genre_metrics, _ = evaluate(model, val_loaders_dict, device)
             user_metrics[uid] = genre_metrics
 
@@ -348,7 +348,7 @@ def inference_pretrain(datasets_dict, args, device, dirname, experiment_name, ba
         user_test_ds.data = datasets_dict[genre]['test'].data[datasets_dict[genre]['test'].data['user_id'] == uid].reset_index(drop=True)
         if len(user_test_ds) > 0:
             test_loaders_dict = {genre: DataLoader(user_test_ds, batch_size=batch_size, shuffle=False,
-                                                    num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)}
+                                                    num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
             genre_metrics, total_mae = evaluate(model, test_loaders_dict, device)
             for g, metrics in genre_metrics.items():
                 genre_srocc_list[g].append(metrics['srocc'])

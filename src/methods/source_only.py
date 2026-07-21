@@ -135,9 +135,9 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
     genre_str = genre
 
     train_loader = DataLoader(datasets_dict[genre]['train'], batch_size=batch_size, shuffle=True,
-                              drop_last=True, num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                              drop_last=True, num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
     val_loaders_dict = {genre: DataLoader(datasets_dict[genre]['val'], batch_size=batch_size, shuffle=False,
-                                          num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)}
+                                          num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
 
     model = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
 
@@ -230,9 +230,9 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
             continue
 
         train_loader = DataLoader(user_train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
-                                  num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                                  num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
         val_loaders_dict = {genre: DataLoader(user_val_ds, batch_size=batch_size, shuffle=False,
-                                              num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)}
+                                              num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
 
         model_user = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
         pretrained_path = pretrained_model_dict[genre]

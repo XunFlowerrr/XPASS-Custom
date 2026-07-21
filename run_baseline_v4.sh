@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# รัน ICI/MIR บน v4 (leak-free) ครบ pipeline — รันในโฟลเดอร์ XPASS-Simple/
-# ต้องมี Dataset/split/v4_fold{1..5}/ อยู่ก่อน (ก๊อปจาก split_v4_xpass)
-# resume ได้: XPASS เขียน checkpoint .pth ต่อ fold; รันซ้ำจะข้ามที่เสร็จแล้ว
+# รัน ICI/MIR บน v4 (leak-free) — รองรับการแยก genre รันขนานกันหลายเครื่อง
+# ตัวอย่างการใช้งาน:
+#   bash run_baseline_v4.sh                (รันหมดทั้ง 3 genres)
+#   bash run_baseline_v4.sh art            (รันเฉพาะ art)
+#   bash run_baseline_v4.sh fashion scenery (รันเฉพาะ fashion และ scenery)
+
 set -e
-GENRES=(art fashion scenery)
+
+if [ $# -gt 0 ]; then
+  GENRES=("$@")
+else
+  GENRES=(art fashion scenery)
+fi
+
 ROOT=Dataset
-# samples_root ต่อ genre (layout จริง: Dataset/sample/{genre}_extracted/...)
 declare -A SR=(
   [art]=Dataset/sample/art_extracted
   [fashion]=Dataset/sample/fashion_extracted
   [scenery]=Dataset/sample/scenery_extracted
 )
 LOG=logs_v4; mkdir -p $LOG
+
+echo "=================================================="
+echo " Running Baseline v4 for genres: ${GENRES[*]}"
+echo "=================================================="
 
 echo "===== [1/3] GIAA (prerequisite) ====="
 for G in "${GENRES[@]}"; do
@@ -41,4 +53,4 @@ for M in ICI MIR; do
       2>&1 | tee "$LOG/agg_${M}_$G.log"
   done
 done
-echo "DONE — CCC เฉลี่ยอยู่ใน $LOG/agg_*.log เอาไปใส่ Table 1 (แทนเลข v3)"
+echo "DONE — ผลลัพธ์อยู่ใน $LOG/agg_*.log"

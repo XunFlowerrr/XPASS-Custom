@@ -39,11 +39,11 @@ def run_main(args):
      test_piaa_dataset) = load_data(args)
 
     train_giaa_loader = DataLoader(train_giaa_dataset, batch_size=batch_size, shuffle=True,
-                                   num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                                   num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
     val_giaa_loader = DataLoader(val_giaa_dataset, batch_size=batch_size, shuffle=False,
-                                 num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                                 num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
     test_piaa_loader = DataLoader(test_piaa_dataset, batch_size=batch_size, shuffle=False,
-                                  num_workers=args.num_workers, timeout=300, collate_fn=collate_fn)
+                                  num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
     src_dataloaders = (train_giaa_loader, val_giaa_loader, test_piaa_loader)
 
     source_only.trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components)
