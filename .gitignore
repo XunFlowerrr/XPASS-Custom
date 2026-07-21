@@ -1,0 +1,27 @@
+*.pkl
+*.csv
+*.txt
+*.pth
+*.json
+*.out
+
+documents
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+exp_note/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
