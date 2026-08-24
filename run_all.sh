@@ -25,7 +25,7 @@ cd "${SCRIPT_DIR}"
 REMOTE="${RCLONE_REMOTE:-Google Drive}"
 FOLDER_ID="${GDRIVE_FOLDER_ID:-1WfoO2zszob9rAe7ya8CkmBt6Ci7p070L}"
 DATASET_PREFIX="v4"
-STAGE="all"
+STAGE="finetune"
 START_FOLD=1
 ALL_FOLDS=(1 2 3 4 5)
 ALL_MODELS=("ICI" "MIR")
@@ -46,7 +46,7 @@ usage() {
 Usage: ./run_all.sh [OPTIONS]
 
 Options:
-  --stage <name>         Pipeline stage to run: all, giaa, pretrain, finetune, agg (default: all)
+  --stage <name>         Pipeline stage to run: finetune, all, giaa, pretrain, agg (default: finetune)
   --start-fold <N>       Start execution from fold N (1-5, default: 1)
   --folds <"1 2 3">      Specify custom list of folds (default: "1 2 3 4 5")
   --models <"ICI MIR">   Specify model architectures (default: "ICI MIR")
@@ -61,8 +61,8 @@ Options:
   -h, --help             Show this help message and exit
 
 Examples:
-  ./run_all.sh                        # Run entire 4-stage pipeline across all 5 folds
-  ./run_all.sh --stage finetune       # Run only PIAA fine-tuning
+  ./run_all.sh                        # Run PIAA fine-tuning & evaluation across all 5 folds
+  ./run_all.sh --stage all            # Run entire 4-stage pipeline (GIAA -> Pretrain -> Finetune -> Agg)
   ./run_all.sh --start-fold 2         # Start pipeline from fold 2 onwards
   ./run_all.sh --models "ICI"         # Run only ICI architecture
   ./run_all.sh --dry-run              # View planned execution queue
@@ -142,19 +142,21 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-# ─── Auto Dataset Setup Check ─────────────────────────────────────────────────
+# ─── Auto Dataset & Pretrained Models Setup Check ─────────────────────────────
 check_dataset() {
   if [ "${DRY_RUN}" = true ]; then
     return 0
   fi
   local test_img="${ROOT_DIR}/sample/art_extracted/art"
   local test_split="${ROOT_DIR}/split/v4_fold1/art/train_PIAA.txt"
-  if [ ! -d "${test_img}" ] || [ ! -f "${test_split}" ]; then
-    echo "⚠️ [Dataset Check] Dataset missing or incomplete in ${ROOT_DIR}/."
-    echo "🚀 Automatically invoking scripts/setup_data.sh to download and prepare data..."
+  local test_weights="models_pth/v4_fold1/art"
+
+  if [ ! -d "${test_img}" ] || [ ! -f "${test_split}" ] || [ ! -d "${test_weights}" ]; then
+    echo "⚠️ [Prerequisite Check] Datasets or pretrained model weights missing in ${ROOT_DIR}/ or models_pth/."
+    echo "🚀 Automatically invoking scripts/setup_data.sh to download and prepare files..."
     bash scripts/setup_data.sh
   else
-    echo "✅ [Dataset Check] Dataset verified in ${ROOT_DIR}/."
+    echo "✅ [Prerequisite Check] Datasets and pretrained model weights verified."
   fi
 }
 
