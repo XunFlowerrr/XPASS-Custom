@@ -16,7 +16,7 @@ STUDIO_HOME = "/teamspace/studios/this_studio"
 @dataclass(frozen=True)
 class FleetConfig:
     # ─── identity ─────────────────────────────────────────────────────────────
-    source_studio: str = "xpass"
+    source_studio: str = "XPASS"
     teamspace: str = "inference-optimization-project"
     org: str | None = "xunpiu"
     user: str | None = None

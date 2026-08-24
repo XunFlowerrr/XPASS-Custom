@@ -49,6 +49,8 @@ def build_config(args) -> FleetConfig:
             f"(or pass --no-verify-push if you know better)"
         )
     return FleetConfig(
+        source_studio=args.source,
+        teamspace=args.teamspace,
         commit=commit,
         machines=args.machines,
         folds=tuple(args.folds),
@@ -145,10 +147,11 @@ def cmd_down(cfg: FleetConfig, args) -> int:
 
 
 def main(argv=None) -> int:
-    # Shared options are attached to the top level AND to every subcommand, so
-    # they work on either side of it -- `fleet.cli plan --machines 1` reads more
-    # naturally than argparse's default of demanding they come first.
     common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--source", "--source-studio", dest="source", default="XPASS",
+                        help="Source golden studio name (default: XPASS)")
+    common.add_argument("--teamspace", default="inference-optimization-project",
+                        help="Lightning teamspace name (default: inference-optimization-project)")
     common.add_argument("--commit", default=None, help="SHA to pin (default: HEAD)")
     common.add_argument("--machines", type=int, default=5)
     common.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
