@@ -2,12 +2,10 @@ import os
 import copy
 from datetime import datetime
 
-import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
 
 from .argflags import parse_arguments, model_dir, get_device
-from .data import load_data, collate_fn
+from .data import load_data, make_loader
 from .train_common import NIMA, num_bins, discover_folds
 from .methods import source_only
 from .inference import inference
@@ -41,12 +39,10 @@ def run_main(args, tracker=None):
      val_giaa_dataset, val_piaa_dataset, _,
      test_piaa_dataset) = load_data(args)
 
-    train_giaa_loader = DataLoader(train_giaa_dataset, batch_size=batch_size, shuffle=True,
-                                   num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-    val_giaa_loader = DataLoader(val_giaa_dataset, batch_size=batch_size, shuffle=False,
-                                 num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-    test_piaa_loader = DataLoader(test_piaa_dataset, batch_size=batch_size, shuffle=False,
-                                  num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
+    train_giaa_loader = make_loader(train_giaa_dataset, batch_size, args.num_workers,
+                                    shuffle=True, reused=True)
+    val_giaa_loader = make_loader(val_giaa_dataset, batch_size, args.num_workers, reused=True)
+    test_piaa_loader = make_loader(test_piaa_dataset, batch_size, args.num_workers)
     src_dataloaders = (train_giaa_loader, val_giaa_loader, test_piaa_loader)
 
     source_only.trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components, tracker=tracker)

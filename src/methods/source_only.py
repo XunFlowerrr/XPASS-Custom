@@ -8,10 +8,9 @@ from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
 import copy
-from torch.utils.data import DataLoader
 
 from ..train_common import earth_mover_distance, build_piaa_model, num_bins, trainable_state
-from ..data import collate_fn
+from ..data import make_loader
 from ..evaluate import evaluate, evaluate_piaa
 from ..checkpoint_callback import safe_save_checkpoint, on_checkpoint_saved
 
@@ -188,10 +187,15 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
     genre = genres[0]
     genre_str = genre
 
-    train_loader = DataLoader(datasets_dict[genre]['train'], batch_size=batch_size, shuffle=True,
-                              drop_last=True, num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-    val_loaders_dict = {genre: DataLoader(datasets_dict[genre]['val'], batch_size=batch_size, shuffle=False,
-                                          num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+    _cache_bytes = int(getattr(args, 'pixel_cache_gb', 0.0) * 1024 ** 3)
+    if _cache_bytes:
+        _mb = (datasets_dict[genre]['train'].warm_pixel_cache(_cache_bytes)
+               + datasets_dict[genre]['val'].warm_pixel_cache(_cache_bytes)) / 1e6
+        print(f"[PixelCache] Decoded {_mb:.0f} MB of images once; epochs reuse them.")
+    train_loader = make_loader(datasets_dict[genre]['train'], batch_size, args.num_workers,
+                               shuffle=True, drop_last=True, reused=True)
+    val_loaders_dict = {genre: make_loader(datasets_dict[genre]['val'], batch_size,
+                                           args.num_workers, reused=True)}
 
     model = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
 
@@ -282,6 +286,7 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
 
     all_user_ids = set(datasets_dict[genre]['train'].data['user_id'].values)
     unique_user_ids = sorted(list(all_user_ids))
+    _cache_bytes = int(getattr(args, 'pixel_cache_gb', 0.0) * 1024 ** 3)
 
     pretrained_path = pretrained_model_dict[genre]
     if pretrained_path is None or not os.path.exists(pretrained_path):
@@ -335,10 +340,16 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
                 tracker.finish_model(early_stopped=True)
             continue
 
-        train_loader = DataLoader(user_train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
-                                  num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-        val_loaders_dict = {genre: DataLoader(user_val_ds, batch_size=batch_size, shuffle=False,
-                                              num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+        # Decode this user's images once here, in the parent, so the forked workers
+        # share them; every epoch would otherwise re-read the same few hundred JPEGs.
+        _cached = (user_train_ds.warm_pixel_cache(_cache_bytes)
+                   + user_val_ds.warm_pixel_cache(_cache_bytes))
+        if uid == unique_user_ids[0] and _cached:
+            print(f"[PixelCache] {_cached / 1e6:.0f} MB per user held in RAM across epochs.")
+        train_loader = make_loader(user_train_ds, batch_size, args.num_workers,
+                                   shuffle=True, drop_last=True, reused=True)
+        val_loaders_dict = {genre: make_loader(user_val_ds, batch_size, args.num_workers,
+                                               reused=True)}
 
         if reuse_model:
             # Every parameter and buffer is covered by the checkpoint, so reloading

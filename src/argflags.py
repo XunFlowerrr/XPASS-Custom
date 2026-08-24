@@ -9,10 +9,24 @@ MODELS_ROOT = os.path.join(PROJ_ROOT, 'models_pth')
 REPORTS_ROOT = os.path.join(PROJ_ROOT, 'reports', 'exp')
 
 
+def default_num_workers():
+    """Workers that leave the training process room to run.
+
+    Decoding one image costs ~7ms, so saturating a modern GPU takes roughly six
+    cores; going wider than (cores - 2) measurably slowed the loader down on an
+    8-vCPU box because the main process was competing with its own workers.
+    """
+    return max(1, min(8, (os.cpu_count() or 4) - 2))
+
+
 def parse_arguments(parse=True):
     parser = argparse.ArgumentParser(description='Training and Testing the Combined Model for data splitting')
 
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=default_num_workers(),
+                        help='DataLoader worker processes (default: CPU count minus 2, capped at 8)')
+    parser.add_argument('--pixel_cache_gb', type=float, default=4.0,
+                        help='RAM budget per dataset for decoded images, in GiB. '
+                             'Avoids re-decoding the same JPEGs every epoch; 0 disables it.')
     # Dataset version identifier (string)
     parser.add_argument('--dataset_ver', type=str, default='v3_all', help='Dataset version (e.g., v3) used to locate split files and tag outputs')
     parser.add_argument('--start_fold', type=int, default=1, help='Fold number to start from (1-indexed). Use to resume from a specific fold when dataset_ver ends with _all.')
