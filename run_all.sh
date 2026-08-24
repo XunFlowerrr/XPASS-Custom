@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# XPASS-Simple Automated Training Pipeline (run_all.sh)
+# XPASS-Simple Automated End-to-End Pipeline (run_all.sh)
 #
-# Automates sequential PIAA fine-tuning across 5 folds, 2 architectures (ICI, MIR),
-# and 3 genres (art, fashion, scenery) with live ETA tracking, smart resume,
-# and automated Google Drive synchronization.
+# Automates the complete 4-stage pipeline:
+#   [1/4] GIAA Training (NIMA backbone per fold & genre)
+#   [2/4] PIAA Pretrain (ICI & MIR pretrain per fold & genre)
+#   [3/4] PIAA Finetune (Personalized user models & evaluation)
+#   [4/4] Aggregate Metrics (Calculates CCC / SROCC per genre)
+#
+# Features:
+#   • Auto-setup datasets if missing (scripts/setup_data.sh)
+#   • Sequential GPU/MPS execution for stability and memory safety
+#   • Smart resume (skips completed stages/jobs automatically)
+#   • Real-time Google Drive synchronization via rclone
+#   • Process safety traps (clean cancellation on SIGINT/SIGTERM)
 # ==============================================================================
 
 set -uo pipefail
@@ -16,6 +25,7 @@ cd "${SCRIPT_DIR}"
 REMOTE="${RCLONE_REMOTE:-Google Drive}"
 FOLDER_ID="${GDRIVE_FOLDER_ID:-1WfoO2zszob9rAe7ya8CkmBt6Ci7p070L}"
 DATASET_PREFIX="v4"
+STAGE="all"
 START_FOLD=1
 ALL_FOLDS=(1 2 3 4 5)
 ALL_MODELS=("ICI" "MIR")
@@ -29,7 +39,6 @@ NO_UPLOAD=false
 LOG_DIR="${SCRIPT_DIR}/logs_v4"
 REPORTS_DIR="${SCRIPT_DIR}/reports"
 MODELS_DIR="${SCRIPT_DIR}/models_pth"
-MASTER_LOG="${SCRIPT_DIR}/run_all_master.log"
 
 # ─── Help / Usage ─────────────────────────────────────────────────────────────
 usage() {
@@ -37,24 +46,26 @@ usage() {
 Usage: ./run_all.sh [OPTIONS]
 
 Options:
+  --stage <name>         Pipeline stage to run: all, giaa, pretrain, finetune, agg (default: all)
   --start-fold <N>       Start execution from fold N (1-5, default: 1)
   --folds <"1 2 3">      Specify custom list of folds (default: "1 2 3 4 5")
   --models <"ICI MIR">   Specify model architectures (default: "ICI MIR")
   --genres <"art ...">   Specify genres (default: "art fashion scenery")
-  --batch-size <N>       Batch size for training (default: 16)
+  --batch-size <N>       Batch size for fine-tuning (default: 16)
   --root-dir <path>      Dataset root directory (default: "Dataset")
   --remote <name>        rclone remote name (default: "Google Drive")
   --folder-id <id>       Google Drive folder ID (default: "1WfoO2zszob9rAe7ya8CkmBt6Ci7p070L")
-  --force                Force re-run even if job report already exists
-  --dry-run              Display the execution plan without running training
+  --force                Force re-run even if outputs already exist
+  --dry-run              Display planned execution plan without running
   --no-upload            Disable automated Google Drive synchronization
   -h, --help             Show this help message and exit
 
 Examples:
-  ./run_all.sh
-  ./run_all.sh --start-fold 2
-  ./run_all.sh --models "ICI" --genres "art"
-  ./run_all.sh --dry-run
+  ./run_all.sh                        # Run entire 4-stage pipeline across all 5 folds
+  ./run_all.sh --stage finetune       # Run only PIAA fine-tuning
+  ./run_all.sh --start-fold 2         # Start pipeline from fold 2 onwards
+  ./run_all.sh --models "ICI"         # Run only ICI architecture
+  ./run_all.sh --dry-run              # View planned execution queue
 EOF
   exit 0
 }
@@ -62,6 +73,10 @@ EOF
 # ─── Parse CLI Options ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --stage)
+      STAGE="$2"
+      shift 2
+      ;;
     --start-fold)
       START_FOLD="$2"
       shift 2
@@ -127,6 +142,22 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
+# ─── Auto Dataset Setup Check ─────────────────────────────────────────────────
+check_dataset() {
+  if [ "${DRY_RUN}" = true ]; then
+    return 0
+  fi
+  local test_img="${ROOT_DIR}/sample/art_extracted/art"
+  local test_split="${ROOT_DIR}/split/v4_fold1/art/train_PIAA.txt"
+  if [ ! -d "${test_img}" ] || [ ! -f "${test_split}" ]; then
+    echo "⚠️ [Dataset Check] Dataset missing or incomplete in ${ROOT_DIR}/."
+    echo "🚀 Automatically invoking scripts/setup_data.sh to download and prepare data..."
+    bash scripts/setup_data.sh
+  else
+    echo "✅ [Dataset Check] Dataset verified in ${ROOT_DIR}/."
+  fi
+}
+
 # ─── Google Drive Sync Helper ─────────────────────────────────────────────────
 sync_gdrive() {
   local src="$1"
@@ -154,7 +185,7 @@ sync_gdrive() {
   fi
 }
 
-# ─── Build Job Queue ──────────────────────────────────────────────────────────
+# ─── Build Execution Queue ────────────────────────────────────────────────────
 ACTIVE_FOLDS=()
 for F in "${ALL_FOLDS[@]}"; do
   if [ "${F}" -ge "${START_FOLD}" ]; then
@@ -162,15 +193,12 @@ for F in "${ALL_FOLDS[@]}"; do
   fi
 done
 
-TOTAL_JOBS=$((${#ACTIVE_FOLDS[@]} * ${#ALL_MODELS[@]} * ${#ALL_GENRES[@]}))
-
 echo "======================================================================"
-echo "🚀 XPASS-Simple Automation Pipeline"
+echo "🚀 XPASS-Simple Automation Pipeline (Stage: ${STAGE})"
 echo "======================================================================"
 echo "• Active Folds:        ${ACTIVE_FOLDS[*]} (start_fold=${START_FOLD})"
 echo "• Architectures:       ${ALL_MODELS[*]}"
 echo "• Genres:              ${ALL_GENRES[*]}"
-echo "• Total Jobs:          ${TOTAL_JOBS}"
 echo "• Batch Size:          ${BATCH_SIZE}"
 echo "• Google Drive Remote: ${REMOTE}"
 echo "• Target Folder ID:    ${FOLDER_ID}"
@@ -179,101 +207,228 @@ echo "• Smart Resume:        $([ "${FORCE}" = true ] && echo "Disabled (Force 
 echo "======================================================================"
 echo ""
 
-if [ "${DRY_RUN}" = true ]; then
-  echo "🔍 [Dry Run] Planned execution order:"
-  JOB_COUNTER=0
-  for F in "${ACTIVE_FOLDS[@]}"; do
-    for M in "${ALL_MODELS[@]}"; do
-      for G in "${ALL_GENRES[@]}"; do
-        JOB_COUNTER=$((JOB_COUNTER + 1))
-        echo "  [Job ${JOB_COUNTER}/${TOTAL_JOBS}] Fold: v4_fold${F} | Model: ${M} | Genre: ${G}"
-      done
-    done
-  done
-  echo ""
-  echo "✅ Dry run complete. No training was executed."
-  exit 0
-fi
+check_dataset
 
-# ─── Execution Loop ───────────────────────────────────────────────────────────
 START_TIMESTAMP=$(date +%s)
-CURRENT_JOB=0
 SUCCESS_COUNT=0
 SKIPPED_COUNT=0
 FAILED_COUNT=0
 FAILED_JOBS=()
 
-for F in "${ACTIVE_FOLDS[@]}"; do
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 1: GIAA Training (NIMA Backbone)
+# ══════════════════════════════════════════════════════════════════════════════
+if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "giaa" ]; then
   echo ""
-  echo "######################################################################"
-  echo "  📁 STARTING FOLD: v4_fold${F}"
-  echo "######################################################################"
-  echo ""
-
-  for M in "${ALL_MODELS[@]}"; do
+  echo "======================================================================"
+  echo "  [STAGE 1/4] GIAA Training (NIMA Backbone Initialization)"
+  echo "======================================================================"
+  for F in "${ACTIVE_FOLDS[@]}"; do
     for G in "${ALL_GENRES[@]}"; do
-      CURRENT_JOB=$((CURRENT_JOB + 1))
       DATASET_VER="${DATASET_PREFIX}_fold${F}"
-      LOG_FILENAME="${M}_${G}_fold${F}.log"
-      LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
+      LOG_FILE="${LOG_DIR}/giaa_${G}_fold${F}.log"
       SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
+      MODEL_DIR="${MODELS_DIR}/${DATASET_VER}/${G}"
 
-      # Smart Resume Check: check if already completed
-      if [ "${FORCE}" = false ] && [ -f "${LOG_FILE}" ]; then
-        if grep -q "Evaluation Results" "${LOG_FILE}" 2>/dev/null || grep -q "Test Average" "${LOG_FILE}" 2>/dev/null; then
-          echo "⏩ [Job ${CURRENT_JOB}/${TOTAL_JOBS}] Skipping already completed: ${DATASET_VER} | ${M} | ${G}"
-          SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
-          continue
-        fi
+      # Check if NIMA model already exists
+      if [ "${FORCE}" = false ] && [ -d "${MODEL_DIR}" ] && ls "${MODEL_DIR}"/*NIMA*.pth 1>/dev/null 2>&1; then
+        echo "⏩ [GIAA] Skipping existing NIMA checkpoint: ${DATASET_VER} | ${G}"
+        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+        continue
       fi
 
-      echo "----------------------------------------------------------------------"
-      echo "▶️ [Job ${CURRENT_JOB}/${TOTAL_JOBS}] Running ${DATASET_VER} | ${M} | ${G}"
-      echo "   • Log: ${LOG_FILE}"
-      echo "   • Start: $(date '+%Y-%m-%d %H:%M:%S')"
-      echo "----------------------------------------------------------------------"
+      if [ "${DRY_RUN}" = true ]; then
+        echo "🔍 [Dry Run] GIAA: ${DATASET_VER} | ${G}"
+        continue
+      fi
 
-      JOB_START_TIME=$(date +%s)
-
-      # Run training sequentially using uv
-      if uv run python -m src.train_PIAA \
+      echo "▶️ [GIAA] Training: ${DATASET_VER} | ${G}"
+      if uv run python -m src.train_GIAA \
         --genre "${G}" \
         --dataset_ver "${DATASET_VER}" \
-        --model_type "${M}" \
-        --piaa_mode PIAA_finetune \
-        --batch_size "${BATCH_SIZE}" \
         --root_dir "${ROOT_DIR}" \
         --samples_root "${SAMPLES_ROOT}" \
         --rclone_remote "${REMOTE}" \
         --gdrive_folder_id "${FOLDER_ID}" \
         $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
         2>&1 | tee "${LOG_FILE}"; then
-
-        JOB_END_TIME=$(date +%s)
-        JOB_DURATION=$((JOB_END_TIME - JOB_START_TIME))
-        echo "✅ [Job ${CURRENT_JOB}/${TOTAL_JOBS}] Completed successfully in ${JOB_DURATION}s."
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-
-        # Sync job log and updated reports immediately
-        sync_gdrive "${LOG_FILE}" "logs_v4/${LOG_FILENAME}" "copy"
+        sync_gdrive "${LOG_FILE}" "logs_v4/giaa_${G}_fold${F}.log" "copy"
         sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
       else
-        echo "❌ [Job ${CURRENT_JOB}/${TOTAL_JOBS}] Failed with error (exit code $?)."
+        echo "❌ [GIAA Error] Failed on ${DATASET_VER} | ${G}"
         FAILED_COUNT=$((FAILED_COUNT + 1))
-        FAILED_JOBS+=("${DATASET_VER}_${M}_${G}")
+        FAILED_JOBS+=("GIAA_${DATASET_VER}_${G}")
       fi
     done
   done
+fi
 
-  # ─── End-of-Fold Synchronization & Cleanup ─────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2: PIAA Pretraining (ICI & MIR Architecture Pretrain)
+# ══════════════════════════════════════════════════════════════════════════════
+if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "pretrain" ]; then
   echo ""
-  echo "📦 [Fold v4_fold${F} Completed] Synchronizing reports and logs to Google Drive..."
-  sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
-  sync_gdrive "${LOG_DIR}/" "logs_v4/" "copy"
-  sync_gdrive "${MODELS_DIR}/" "models_pth/" "move" "--include *_finetune.pth"
-done
+  echo "======================================================================"
+  echo "  [STAGE 2/4] PIAA Pretraining (ICI / MIR Pretraining on GIAA data)"
+  echo "======================================================================"
+  for F in "${ACTIVE_FOLDS[@]}"; do
+    for M in "${ALL_MODELS[@]}"; do
+      for G in "${ALL_GENRES[@]}"; do
+        DATASET_VER="${DATASET_PREFIX}_fold${F}"
+        LOG_FILE="${LOG_DIR}/${M}_pretrain_${G}_fold${F}.log"
+        SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
+        MODEL_DIR="${MODELS_DIR}/${DATASET_VER}/${G}"
 
-# ─── Summary ──────────────────────────────────────────────────────────────────
+        # Check if pretrain model already exists
+        if [ "${FORCE}" = false ] && [ -d "${MODEL_DIR}" ] && ls "${MODEL_DIR}"/*"${M}"*pretrain.pth 1>/dev/null 2>&1; then
+          echo "⏩ [Pretrain] Skipping existing pretrain checkpoint: ${DATASET_VER} | ${M} | ${G}"
+          SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+          continue
+        fi
+
+        if [ "${DRY_RUN}" = true ]; then
+          echo "🔍 [Dry Run] Pretrain: ${DATASET_VER} | ${M} | ${G}"
+          continue
+        fi
+
+        echo "▶️ [Pretrain] Training: ${DATASET_VER} | ${M} | ${G}"
+        if uv run python -m src.train_PIAA \
+          --genre "${G}" \
+          --dataset_ver "${DATASET_VER}" \
+          --model_type "${M}" \
+          --piaa_mode PIAA_pretrain \
+          --batch_size 128 \
+          --root_dir "${ROOT_DIR}" \
+          --samples_root "${SAMPLES_ROOT}" \
+          --rclone_remote "${REMOTE}" \
+          --gdrive_folder_id "${FOLDER_ID}" \
+          $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
+          2>&1 | tee "${LOG_FILE}"; then
+          SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+          sync_gdrive "${LOG_FILE}" "logs_v4/${M}_pretrain_${G}_fold${F}.log" "copy"
+          sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
+        else
+          echo "❌ [Pretrain Error] Failed on ${DATASET_VER} | ${M} | ${G}"
+          FAILED_COUNT=$((FAILED_COUNT + 1))
+          FAILED_JOBS+=("Pretrain_${DATASET_VER}_${M}_${G}")
+        fi
+      done
+    done
+  done
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 3: PIAA Fine-Tuning (User-Level Personalization)
+# ══════════════════════════════════════════════════════════════════════════════
+if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
+  echo ""
+  echo "======================================================================"
+  echo "  [STAGE 3/4] PIAA Fine-Tuning (Personalized User Finetune & Evaluation)"
+  echo "======================================================================"
+  for F in "${ACTIVE_FOLDS[@]}"; do
+    echo ""
+    echo "----------------------------------------------------------------------"
+    echo "  📁 Processing Fold: v4_fold${F}"
+    echo "----------------------------------------------------------------------"
+
+    for M in "${ALL_MODELS[@]}"; do
+      for G in "${ALL_GENRES[@]}"; do
+        DATASET_VER="${DATASET_PREFIX}_fold${F}"
+        LOG_FILENAME="${M}_finetune_${G}_fold${F}.log"
+        LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
+        SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
+
+        # Smart Resume Check: check if already completed
+        if [ "${FORCE}" = false ] && [ -f "${LOG_FILE}" ]; then
+          if grep -q "Evaluation Results" "${LOG_FILE}" 2>/dev/null || grep -q "Test Average" "${LOG_FILE}" 2>/dev/null; then
+            echo "⏩ [Finetune] Skipping already completed: ${DATASET_VER} | ${M} | ${G}"
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            continue
+          fi
+        fi
+
+        if [ "${DRY_RUN}" = true ]; then
+          echo "🔍 [Dry Run] Finetune: ${DATASET_VER} | ${M} | ${G}"
+          continue
+        fi
+
+        echo "▶️ [Finetune] Running: ${DATASET_VER} | ${M} | ${G}"
+        JOB_START_TIME=$(date +%s)
+
+        if uv run python -m src.train_PIAA \
+          --genre "${G}" \
+          --dataset_ver "${DATASET_VER}" \
+          --model_type "${M}" \
+          --piaa_mode PIAA_finetune \
+          --batch_size "${BATCH_SIZE}" \
+          --root_dir "${ROOT_DIR}" \
+          --samples_root "${SAMPLES_ROOT}" \
+          --rclone_remote "${REMOTE}" \
+          --gdrive_folder_id "${FOLDER_ID}" \
+          $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
+          2>&1 | tee "${LOG_FILE}"; then
+
+          JOB_END_TIME=$(date +%s)
+          JOB_DURATION=$((JOB_END_TIME - JOB_START_TIME))
+          echo "✅ [Finetune] Completed ${DATASET_VER} | ${M} | ${G} in ${JOB_DURATION}s."
+          SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+
+          sync_gdrive "${LOG_FILE}" "logs_v4/${LOG_FILENAME}" "copy"
+          sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
+        else
+          echo "❌ [Finetune Error] Failed on ${DATASET_VER} | ${M} | ${G}"
+          FAILED_COUNT=$((FAILED_COUNT + 1))
+          FAILED_JOBS+=("Finetune_${DATASET_VER}_${M}_${G}")
+        fi
+      done
+    done
+
+    # End-of-Fold Synchronization & Cleanup
+    if [ "${DRY_RUN}" = false ]; then
+      echo ""
+      echo "📦 [Fold v4_fold${F} Completed] Synchronizing reports and logs to Google Drive..."
+      sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
+      sync_gdrive "${LOG_DIR}/" "logs_v4/" "copy"
+      sync_gdrive "${MODELS_DIR}/" "models_pth/" "move" "--include *_finetune.pth"
+    fi
+  done
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 4: Aggregate Evaluation Metrics
+# ══════════════════════════════════════════════════════════════════════════════
+if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "agg" ]; then
+  echo ""
+  echo "======================================================================"
+  echo "  [STAGE 4/4] Aggregate Metrics Across All Folds"
+  echo "======================================================================"
+  for M in "${ALL_MODELS[@]}"; do
+    for G in "${ALL_GENRES[@]}"; do
+      LOG_FILE="${LOG_DIR}/agg_${M}_${G}.log"
+      if [ "${DRY_RUN}" = true ]; then
+        echo "🔍 [Dry Run] Aggregate: ${M} | ${G}"
+        continue
+      fi
+
+      echo "▶️ [Aggregate] Summarizing: ${M} | ${G}"
+      uv run python -m src.analysis aggregate \
+        --version v4 \
+        --genre "${G}" \
+        --pattern finetune \
+        --method "${M}" \
+        2>&1 | tee "${LOG_FILE}" || true
+
+      sync_gdrive "${LOG_FILE}" "logs_v4/agg_${M}_${G}.log" "copy"
+    done
+  done
+
+  if [ "${DRY_RUN}" = false ]; then
+    sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
+  fi
+fi
+
+# ─── Execution Summary ────────────────────────────────────────────────────────
 END_TIMESTAMP=$(date +%s)
 TOTAL_DURATION=$((END_TIMESTAMP - START_TIMESTAMP))
 HOURS=$((TOTAL_DURATION / 3600))
@@ -282,18 +437,17 @@ SECONDS=$((TOTAL_DURATION % 60))
 
 echo ""
 echo "======================================================================"
-echo "🎉 PIPELINE EXECUTION SUMMARY"
+echo "🎉 PIPELINE SUMMARY (Stage: ${STAGE})"
 echo "======================================================================"
-echo "• Total Duration: ${HOURS}h ${MINUTES}m ${SECONDS}s"
-echo "• Total Jobs:     ${TOTAL_JOBS}"
-echo "• Succeeded:      ${SUCCESS_COUNT}"
-echo "• Skipped:        ${SKIPPED_COUNT}"
-echo "• Failed:         ${FAILED_COUNT}"
+echo "• Total Elapsed: ${HOURS}h ${MINUTES}m ${SECONDS}s"
+echo "• Succeeded:     ${SUCCESS_COUNT}"
+echo "• Skipped:       ${SKIPPED_COUNT}"
+echo "• Failed:        ${FAILED_COUNT}"
 
 if [ "${FAILED_COUNT}" -gt 0 ]; then
   echo "⚠️ Failed Jobs:   ${FAILED_JOBS[*]}"
   exit 1
 else
-  echo "✅ All jobs completed successfully!"
+  echo "✅ All pipeline tasks finished successfully!"
   exit 0
 fi

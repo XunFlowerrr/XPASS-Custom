@@ -27,3 +27,13 @@ Thumbs.db
 
 # Environment
 .env
+
+# Logs and Datasets
+logs_v4/
+logs/
+Dataset/
+sample/
+sample.zip
+xpass_v4_essentials.zip
+models_pth/
+reports/
