@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from collections import defaultdict
 from tqdm import tqdm
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, pearsonr
 from sklearn.metrics import ndcg_score
 
 from .train_common import earth_mover_distance, num_bins
@@ -180,6 +180,7 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
 
         unique_user_ids = np.unique(user_ids)
         sroccs = []
+        plccs = []
         ndcgs = []
         cccs = []
         for uid in unique_user_ids:
@@ -194,6 +195,8 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
             uid_true = true_scores[uid_mask]
             uid_srocc, _ = spearmanr(uid_pred, uid_true)
             sroccs.append(uid_srocc)
+            uid_plcc, _ = pearsonr(uid_pred, uid_true)
+            plccs.append(uid_plcc)
             uid_ndcg = ndcg_score([uid_true], [uid_pred], k=10)
             ndcgs.append(uid_ndcg)
             mu_p, mu_t = uid_pred.mean(), uid_true.mean()
@@ -202,6 +205,7 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
             uid_ccc = 2 * cov / (var_p + var_t + (mu_p - mu_t) ** 2 + 1e-8)
             cccs.append(float(uid_ccc))
         genre_srocc = np.mean(sroccs) if len(sroccs) > 0 else 0.0
+        genre_plcc = np.mean(plccs) if len(plccs) > 0 else 0.0
         genre_ndcg = np.mean(ndcgs) if len(ndcgs) > 0 else 0.0
         genre_ccc = np.mean(cccs) if len(cccs) > 0 else 0.0
 
@@ -209,6 +213,7 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
 
         genre_metrics[genre] = {
             'srocc': genre_srocc,
+            'plcc': genre_plcc,
             'mae': genre_mae,
             'ndcg@10': genre_ndcg,
             'ccc': genre_ccc,

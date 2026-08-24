@@ -101,6 +101,7 @@ def aggregate(args):
     all_user_ndcg  = {}
     all_user_srocc = {}
     all_user_ccc   = {}
+    all_user_plcc  = {}
 
     for fold_dir in fold_dirs:
         genre_dir = fold_dir / genre
@@ -148,6 +149,7 @@ def aggregate(args):
             mae  = genre_metrics.get("mae")
             ndcg = genre_metrics.get("ndcg@10")
             srocc = genre_metrics.get("srocc")
+            plcc = genre_metrics.get("plcc")
             ccc = genre_metrics.get("ccc")
             if mae is not None:
                 all_user_mae.setdefault(user_id, []).append(mae)
@@ -155,6 +157,8 @@ def aggregate(args):
                 all_user_ndcg.setdefault(user_id, []).append(ndcg)
             if srocc is not None:
                 all_user_srocc.setdefault(user_id, []).append(srocc)
+            if plcc is not None:
+                all_user_plcc.setdefault(user_id, []).append(plcc)
             if ccc is not None:
                 all_user_ccc.setdefault(user_id, []).append(ccc)
 
@@ -168,11 +172,13 @@ def aggregate(args):
     user_avg_ndcg  = [sum(v) / len(v) for v in all_user_ndcg.values()]
     user_avg_srocc = [sum(v) / len(v) for v in all_user_srocc.values()]
     user_avg_ccc   = [sum(v) / len(v) for v in all_user_ccc.values()]
+    user_avg_plcc  = [sum(v) / len(v) for v in all_user_plcc.values()]
 
     avg_mae,   std_mae   = _stats(user_avg_mae)
     avg_ndcg,  std_ndcg  = _stats(user_avg_ndcg)
     avg_srocc, std_srocc = _stats(user_avg_srocc)
     avg_ccc,   std_ccc   = _stats(user_avg_ccc) if user_avg_ccc else (None, None)
+    avg_plcc,  std_plcc  = _stats(user_avg_plcc) if user_avg_plcc else (None, None)
 
     print(f"\n=== Aggregated Results ({version}, {genre}, pattern='{pattern}') ===")
     print(f"  Folds:           {len(fold_dirs)}")
@@ -180,6 +186,8 @@ def aggregate(args):
     print(f"  Average MAE:     {avg_mae:.6f} (std: {std_mae:.6f})")
     print(f"  Average NDCG@10: {avg_ndcg:.6f} (std: {std_ndcg:.6f})")
     print(f"  Average SROCC:   {avg_srocc:.6f} (std: {std_srocc:.6f})")
+    if avg_plcc is not None:
+        print(f"  Average PLCC:    {avg_plcc:.6f} (std: {std_plcc:.6f})")
     if avg_ccc is not None:
         print(f"  Average CCC:     {avg_ccc:.6f} (std: {std_ccc:.6f})")
 

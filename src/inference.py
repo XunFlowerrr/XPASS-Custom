@@ -168,6 +168,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
     genre_srocc_list = defaultdict(list)
     genre_mae_list = defaultdict(list)
     genre_ndcg_list = defaultdict(list)
+    genre_plcc_list = defaultdict(list)
     genre_ccc_list = defaultdict(list)
     for genre in genres:
         all_user_ids.update(datasets_dict[genre]['test'].data['user_id'].values)
@@ -207,6 +208,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
                 genre_mae_list[genre].append(metrics['mae'])
                 genre_ndcg_list[genre].append(metrics['ndcg@10'])
                 genre_ccc_list[genre].append(metrics['ccc'])
+                genre_plcc_list[genre].append(metrics['plcc'])
             results[uid] = (genre_metrics, total_mae)
 
     # Calculate genre-specific averages
@@ -218,11 +220,12 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
                 'mae': np.mean(genre_mae_list[genre]),
                 'ndcg@10': np.mean(genre_ndcg_list[genre]),
                 'ccc': np.mean(genre_ccc_list[genre]),
+                'plcc': np.mean(genre_plcc_list[genre]),
             }
 
     for genre, metrics in genre_avg_metrics.items():
-        print(f"[{genre} Test] Avg SROCC={metrics['srocc']:.4f}  MAE={metrics['mae']:.4f}  "
-              f"NDCG@10={metrics['ndcg@10']:.4f}  CCC={metrics['ccc']:.4f}")
+        print(f"[{genre} Test] Avg SROCC={metrics['srocc']:.4f} PLCC={metrics['plcc']:.4f} "
+              f"MAE={metrics['mae']:.4f}  NDCG@10={metrics['ndcg@10']:.4f}  CCC={metrics['ccc']:.4f}")
 
     # Save test performance to JSON
     _prefix = genre_str
@@ -234,7 +237,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
     for uid, (genre_metrics_user, total_mae) in results.items():
         if isinstance(genre_metrics_user, dict):
             per_user_results[str(uid)] = {
-                genre: {'srocc': float(metrics['srocc']), 'mae': float(metrics['mae']), 'ndcg@10': float(metrics['ndcg@10']), 'ccc': float(metrics['ccc'])}
+                genre: {'srocc': float(metrics['srocc']), 'mae': float(metrics['mae']), 'ndcg@10': float(metrics['ndcg@10']), 'ccc': float(metrics['ccc']), 'plcc': float(metrics['plcc'])}
                 for genre, metrics in genre_metrics_user.items()
             }
 
@@ -244,7 +247,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
         'mode': 'PIAA_finetune',
         'genres': genres,
         'average_metrics': {
-            genre: {'srocc': float(metrics['srocc']), 'mae': float(metrics['mae']), 'ndcg@10': float(metrics['ndcg@10']), 'ccc': float(metrics['ccc'])}
+            genre: {'srocc': float(metrics['srocc']), 'plcc': float(metrics['plcc']), 'mae': float(metrics['mae']), 'ndcg@10': float(metrics['ndcg@10']), 'ccc': float(metrics['ccc'])}
             for genre, metrics in genre_avg_metrics.items()
         },
         'per_user_metrics': per_user_results
