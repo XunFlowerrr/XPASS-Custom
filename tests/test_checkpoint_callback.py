@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 import pytest
 import torch
 from unittest.mock import patch, MagicMock
@@ -8,6 +9,8 @@ from src.checkpoint_callback import (
     safe_save_checkpoint,
     upload_to_gdrive,
     on_checkpoint_saved,
+    get_upload_manager,
+    wait_for_all_uploads,
     FAILED_LOG_PATH,
 )
 
@@ -107,10 +110,11 @@ def test_upload_to_gdrive_all_retries_fail_logs_error(tmp_path):
         os.remove(FAILED_LOG_PATH)
 
 
-def test_on_checkpoint_saved_lifecycle_retention(tmp_path):
+def test_on_checkpoint_saved_sync_retention(tmp_path):
     class DummyArgs:
         no_gdrive_upload = False
         delete_local_on_upload = False
+        sync_upload = True
         rclone_remote = "Google Drive"
         gdrive_folder_id = "test_folder_id"
 
@@ -128,7 +132,6 @@ def test_on_checkpoint_saved_lifecycle_retention(tmp_path):
             is_temporary=False,
         )
         assert success is True
-        # Local file must be preserved
         assert os.path.exists(dummy_file)
 
         # 2. Temporary model (is_temporary=True) -> Deleted on upload success
@@ -143,25 +146,74 @@ def test_on_checkpoint_saved_lifecycle_retention(tmp_path):
         assert not os.path.exists(dummy_file)
 
 
-def test_on_checkpoint_saved_failsafe_preservation_on_upload_failure(tmp_path):
+def test_on_checkpoint_saved_async_queue_and_flush(tmp_path):
     class DummyArgs:
         no_gdrive_upload = False
-        delete_local_on_upload = True  # Even if requested to delete
+        delete_local_on_upload = True
+        sync_upload = False
+        upload_workers = 2
+        rclone_remote = "Google Drive"
+        gdrive_folder_id = "test_folder_id"
 
-    dummy_file = tmp_path / "critical_model.pth"
-    dummy_file.write_bytes(b"weights")
+    dummy_file = tmp_path / "async_model.pth"
+    dummy_file.write_bytes(b"async_weights")
 
     with patch("src.checkpoint_callback.upload_to_gdrive") as mock_upload:
-        # Upload fails
-        mock_upload.return_value = False
+        # Mock upload taking small delay
+        def slow_upload(*args, **kwargs):
+            time.sleep(0.05)
+            return True
 
-        success = on_checkpoint_saved(
+        mock_upload.side_effect = slow_upload
+
+        # Call on_checkpoint_saved asynchronously
+        start_time = time.time()
+        dispatched = on_checkpoint_saved(
             local_path=str(dummy_file),
             dataset_ver="v4_fold1",
             genre="art",
             args=DummyArgs(),
-            is_temporary=True,  # Even if temporary
+            is_temporary=True,
+            async_upload=True,
         )
-        assert success is False
-        # FAIL-SAFE: Local file MUST NEVER BE DELETED on upload failure
+        dispatch_duration = time.time() - start_time
+
+        # Verify dispatch is non-blocking (< 30ms)
+        assert dispatched is True
+        assert dispatch_duration < 0.04
+
+        # Wait for queue to flush
+        wait_for_all_uploads(timeout=5.0)
+
+        # Once background upload completes, verify deletion was executed
+        assert not os.path.exists(dummy_file)
+        assert mock_upload.call_count == 1
+
+
+def test_on_checkpoint_saved_async_failsafe_retention_on_error(tmp_path):
+    class DummyArgs:
+        no_gdrive_upload = False
+        delete_local_on_upload = True
+        sync_upload = False
+        upload_workers = 2
+
+    dummy_file = tmp_path / "failed_async_model.pth"
+    dummy_file.write_bytes(b"critical_weights")
+
+    with patch("src.checkpoint_callback.upload_to_gdrive") as mock_upload:
+        mock_upload.return_value = False
+
+        dispatched = on_checkpoint_saved(
+            local_path=str(dummy_file),
+            dataset_ver="v4_fold1",
+            genre="art",
+            args=DummyArgs(),
+            is_temporary=True,
+            async_upload=True,
+        )
+        assert dispatched is True
+
+        wait_for_all_uploads(timeout=5.0)
+
+        # FAIL-SAFE: Local file must remain intact even if deletion was requested
         assert os.path.exists(dummy_file)

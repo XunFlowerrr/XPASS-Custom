@@ -12,6 +12,7 @@ from .train_common import NIMA, num_bins, discover_folds
 from .methods import source_only
 from .inference import inference
 from .progress import ProgressTracker
+from .checkpoint_callback import wait_for_all_uploads
 
 
 def run_main(args, tracker=None):
@@ -112,3 +113,5 @@ if __name__ == '__main__':
         else:
             tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=1, fold_name=args_outer.dataset_ver)
             run_main(args_outer, tracker=tracker)
+
+    wait_for_all_uploads()

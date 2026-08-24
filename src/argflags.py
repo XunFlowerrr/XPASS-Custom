@@ -47,6 +47,10 @@ def parse_arguments(parse=True):
                         help='Disable automated Google Drive checkpoint upload')
     parser.add_argument('--delete_local_on_upload', action='store_true', default=False,
                         help='Delete local checkpoint files immediately after successful Google Drive upload')
+    parser.add_argument('--upload_workers', type=int, default=2,
+                        help='Number of concurrent background workers for Google Drive upload (default: 2)')
+    parser.add_argument('--sync_upload', action='store_true', default=False,
+                        help='Force synchronous checkpoint upload instead of background asynchronous queue')
 
     if parse:
         return parser.parse_args()
