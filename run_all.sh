@@ -421,7 +421,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 4: Aggregate Evaluation Metrics
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "agg" ]; then
+if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ] || [ "${STAGE}" = "agg" ]; then
   echo ""
   echo "======================================================================"
   echo "  [STAGE 4/4] Aggregate Metrics Across All Folds"
