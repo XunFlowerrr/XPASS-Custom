@@ -230,8 +230,6 @@ class PIAA_ICI(nn.Module):
         I_ij = torch.sum(fused_features_img, dim=1, keepdim=False) + torch.sum(fused_features_user, dim=1, keepdim=False)
         interaction_outputs = self.attr_corr(I_ij)
         direct_outputs = self.direct_fc(prob)
-        self._last_interaction_mean = interaction_outputs.detach().abs().mean().item()
-        self._last_direct_mean = direct_outputs.detach().abs().mean().item()
         if return_feat:
             return interaction_outputs + direct_outputs, I_ij
         return interaction_outputs + direct_outputs
@@ -305,11 +303,32 @@ class PIAA_MIR(nn.Module):
         I_ij = self.interaction_mlp(A_flat)
         interaction_outputs = self.attr_corr(I_ij)
         direct_outputs = self.direct_fc(prob)
-        self._last_interaction_mean = interaction_outputs.detach().abs().mean().item()
-        self._last_direct_mean = direct_outputs.detach().abs().mean().item()
         if return_feat:
             return interaction_outputs + direct_outputs, I_ij
         return interaction_outputs + direct_outputs
+
+
+# ─── Checkpoint helpers ───────────────────────────────────────────────────────
+#
+# During PIAA finetuning `freeze_backbone()` freezes every submodule under
+# `nima_dict` (backbone / feat_proj / fc_aesthetic), and the optimizer only ever
+# receives parameters with requires_grad=True. Those tensors therefore stay
+# bit-identical to the pretrain checkpoint for every user, so storing them once
+# per user costs ~346 MB of duplicated weights against ~7 MB that actually
+# changed. `trainable_state()` keeps only the part that moved; the frozen half
+# is restored from the pretrain checkpoint at load time.
+
+FROZEN_STATE_PREFIX = 'nima_dict.'
+
+
+def trainable_state(state_dict):
+    """Return the entries of `state_dict` that PIAA finetuning can modify."""
+    return {k: v for k, v in state_dict.items() if not k.startswith(FROZEN_STATE_PREFIX)}
+
+
+def is_trainable_only_state(state_dict):
+    """True when a checkpoint holds only the trainable half (no frozen backbone)."""
+    return not any(k.startswith(FROZEN_STATE_PREFIX) for k in state_dict)
 
 
 def build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args):

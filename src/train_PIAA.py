@@ -107,7 +107,8 @@ def run_main(args, tracker=None):
         source_only.trainer_finetune(
             datasets_dict_user, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
             num_attr, num_pt, tracker=tracker)
-        inference_finetune(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict)
+        inference_finetune(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict,
+                           pretrained_model_dict=pretrained_model_dict)
         if not args.keep_finetune_pth:
             for pth_file in [f for f in os.listdir(dirname) if f.endswith('_finetune.pth')]:
                 os.remove(os.path.join(dirname, pth_file))
