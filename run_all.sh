@@ -36,6 +36,13 @@ FORCE=false
 DRY_RUN=false
 NO_UPLOAD=false
 KEEP_PTH=true
+NUM_WORKERS=""        # empty => let src/argflags.default_num_workers() decide
+PIXEL_CACHE_GB=""
+JOBS=1                # shards to fan out on this machine
+SHARD_ID=1
+SHARD_TOTAL=1
+RUN_AGG=true
+SKIP_SETUP=false
 
 LOG_DIR="${SCRIPT_DIR}/logs_v4"
 REPORTS_DIR="${SCRIPT_DIR}/reports"
@@ -60,6 +67,12 @@ Options:
   --dry-run              Display planned execution plan without running
   --no-upload            Disable automated Google Drive synchronization
   --no-keep-pth          Delete local *_finetune.pth after upload (default: keep them locally)
+  --jobs <N>             Run N training jobs concurrently on this machine (default: 1)
+  --shard <i/N>          Run only shard i of N (round-robin over model x genre)
+  --num-workers <N>      DataLoader workers per job (default: nproc/jobs when --jobs > 1)
+  --pixel-cache-gb <F>   RAM budget per dataset for decoded images (default: from argflags)
+  --no-agg               Skip stage 4 (aggregate metrics)
+  --skip-setup           Skip the dataset prerequisite check
   -h, --help             Show this help message and exit
 
 Examples:
@@ -68,11 +81,13 @@ Examples:
   ./run_all.sh --start-fold 2         # Start pipeline from fold 2 onwards
   ./run_all.sh --models "ICI"         # Run only ICI architecture
   ./run_all.sh --dry-run              # View planned execution queue
+  ./run_all.sh --folds "1" --jobs 2   # One fold, two concurrent jobs (measured 1.79x on an L4)
 EOF
   exit 0
 }
 
 # ─── Parse CLI Options ────────────────────────────────────────────────────────
+ORIG_ARGS=("$@")   # --jobs re-execs this script with these plus --shard
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stage)
@@ -127,6 +142,31 @@ while [[ $# -gt 0 ]]; do
       KEEP_PTH=false
       shift 1
       ;;
+    --jobs)
+      JOBS="$2"
+      shift 2
+      ;;
+    --shard)
+      SHARD_ID="${2%%/*}"
+      SHARD_TOTAL="${2##*/}"
+      shift 2
+      ;;
+    --num-workers)
+      NUM_WORKERS="$2"
+      shift 2
+      ;;
+    --pixel-cache-gb)
+      PIXEL_CACHE_GB="$2"
+      shift 2
+      ;;
+    --no-agg)
+      RUN_AGG=false
+      shift 1
+      ;;
+    --skip-setup)
+      SKIP_SETUP=true
+      shift 1
+      ;;
     -h|--help)
       usage
       ;;
@@ -136,6 +176,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ─── Worker Sizing ────────────────────────────────────────────────────────────
+# Measured on an 8-vCPU L4: decode+transform runs at 139 img/s per core against a
+# GPU that eats 825 img/s, so the loader is the bottleneck. Two jobs at 4 workers
+# each aggregated 546 img/s vs 305 for one job at 6 -- but letting both shards
+# keep the single-job default (nproc-2 = 6) puts 12 workers on 8 cores, which
+# benchmarked slower than 4. Divide the cores by the shard count instead.
+NPROC=$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )
+if [ -z "${NUM_WORKERS}" ] && [ "${SHARD_TOTAL}" -gt 1 ]; then
+  NUM_WORKERS=$(( NPROC / SHARD_TOTAL ))
+  [ "${NUM_WORKERS}" -lt 1 ] && NUM_WORKERS=1
+fi
+# Nothing in src/ calls torch.set_num_threads, so each process would otherwise
+# claim NPROC intra-op threads and the shards would fight over the same cores.
+export OMP_NUM_THREADS="${NUM_WORKERS:-${NPROC}}"
+export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
 
 # ─── Local Checkpoint Retention ───────────────────────────────────────────────
 # KEEP_PTH=true  -> train_PIAA keeps *_finetune.pth, and rclone "copy" leaves the
@@ -161,7 +217,7 @@ trap cleanup SIGINT SIGTERM
 
 # ─── Auto Dataset & Pretrained Models Setup Check ─────────────────────────────
 check_dataset() {
-  if [ "${DRY_RUN}" = true ]; then
+  if [ "${DRY_RUN}" = true ] || [ "${SKIP_SETUP}" = true ]; then
     return 0
   fi
   local test_img="${ROOT_DIR}/sample/art_extracted/art"
@@ -171,7 +227,17 @@ check_dataset() {
   if [ ! -d "${test_img}" ] || [ ! -f "${test_split}" ] || [ ! -d "${test_weights}" ]; then
     echo "⚠️ [Prerequisite Check] Datasets or pretrained model weights missing in ${ROOT_DIR}/ or models_pth/."
     echo "🚀 Automatically invoking scripts/setup_data.sh to download and prepare files..."
-    bash scripts/setup_data.sh
+    # mkdir is atomic on both macOS and Linux; flock is not available on macOS.
+    # Without this, two shards on a fresh clone each start a 17 GB download.
+    if mkdir "${SCRIPT_DIR}/.setup.lock" 2>/dev/null; then
+      trap 'rmdir "${SCRIPT_DIR}/.setup.lock" 2>/dev/null || true' EXIT
+      bash scripts/setup_data.sh
+      rmdir "${SCRIPT_DIR}/.setup.lock" 2>/dev/null || true
+      trap - EXIT
+    else
+      echo "⏳ Another process is already running setup_data.sh; waiting for it..."
+      while [ -d "${SCRIPT_DIR}/.setup.lock" ]; do sleep 10; done
+    fi
   else
     echo "✅ [Prerequisite Check] Datasets and pretrained model weights verified."
   fi
@@ -228,6 +294,54 @@ echo ""
 
 check_dataset
 
+# ─── Concurrent Shard Fan-out ─────────────────────────────────────────────────
+# Splitting inside this script (rather than launching two run_all.sh from
+# outside) keeps the prerequisite check, the shard partition and the final
+# aggregation in one place. Children carry --shard, so they never re-enter here.
+STAGE_FANOUT_DONE=false
+if [ "${JOBS}" -gt 1 ] && [ "${SHARD_TOTAL}" -eq 1 ]; then
+  if [ "${DRY_RUN}" = true ]; then
+    for i in $(seq 1 "${JOBS}"); do
+      echo ""
+      echo "────────── shard ${i}/${JOBS} ──────────"
+      bash "${BASH_SOURCE[0]}" "${ORIG_ARGS[@]}" --shard "${i}/${JOBS}" --no-agg --skip-setup
+    done
+  else
+    echo "🧵 [Fan-out] Running ${JOBS} shards concurrently (${NUM_WORKERS:-auto} workers each)"
+    SHARD_PIDS=()
+    for i in $(seq 1 "${JOBS}"); do
+      bash "${BASH_SOURCE[0]}" "${ORIG_ARGS[@]}" --shard "${i}/${JOBS}" --no-agg --skip-setup \
+        > "${LOG_DIR}/shard_${i}_of_${JOBS}.log" 2>&1 &
+      SHARD_PIDS+=($!)
+      echo "   shard ${i}/${JOBS} -> pid $! -> ${LOG_DIR}/shard_${i}_of_${JOBS}.log"
+    done
+    # The default cleanup() trap only exits; it leaves the shards orphaned.
+    trap 'echo ""; echo "⚠️ [Fan-out] Interrupted, stopping shards..."; kill "${SHARD_PIDS[@]}" 2>/dev/null; exit 130' SIGINT SIGTERM
+    SHARD_RC=0
+    for pid in "${SHARD_PIDS[@]}"; do
+      wait "${pid}" || SHARD_RC=1
+    done
+    trap cleanup SIGINT SIGTERM
+    [ "${SHARD_RC}" -eq 0 ] && echo "✅ [Fan-out] All ${JOBS} shards finished" \
+                            || echo "⚠️ [Fan-out] At least one shard reported failures"
+  fi
+  STAGE_FANOUT_DONE=true
+fi
+
+# ─── Shard Filter ─────────────────────────────────────────────────────────────
+# Round-robin over the (model x genre) cross-product within a fold, so each shard
+# gets one of every genre and the two processes stay load-balanced.
+#
+# JOB_SEQ MUST advance for every job considered, including ones later skipped by
+# the resume check. If it only advanced for jobs that actually run, a retry would
+# re-partition differently and two shards could converge on the same (model,
+# genre) -- both writing the same report prefix and models_pth directory.
+shard_skip() {
+  JOB_SEQ=$((JOB_SEQ + 1))
+  [ "${SHARD_TOTAL}" -le 1 ] && return 1
+  [ $(( (JOB_SEQ - 1) % SHARD_TOTAL )) -ne $(( SHARD_ID - 1 )) ]
+}
+
 START_TIMESTAMP=$(date +%s)
 SUCCESS_COUNT=0
 SKIPPED_COUNT=0
@@ -237,13 +351,15 @@ FAILED_JOBS=()
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 1: GIAA Training (NIMA Backbone)
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "giaa" ]; then
+if [ "${STAGE_FANOUT_DONE}" = false ] && { [ "${STAGE}" = "all" ] || [ "${STAGE}" = "giaa" ]; }; then
   echo ""
   echo "======================================================================"
   echo "  [STAGE 1/4] GIAA Training (NIMA Backbone Initialization)"
   echo "======================================================================"
   for F in "${ACTIVE_FOLDS[@]}"; do
+    JOB_SEQ=0
     for G in "${ALL_GENRES[@]}"; do
+      shard_skip && continue
       DATASET_VER="${DATASET_PREFIX}_fold${F}"
       LOG_FILE="${LOG_DIR}/giaa_${G}_fold${F}.log"
       SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
@@ -269,6 +385,8 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "giaa" ]; then
         --samples_root "${SAMPLES_ROOT}" \
         --rclone_remote "${REMOTE}" \
         --gdrive_folder_id "${FOLDER_ID}" \
+        $([ -n "${NUM_WORKERS}" ] && echo "--num_workers ${NUM_WORKERS}") \
+        $([ -n "${PIXEL_CACHE_GB}" ] && echo "--pixel_cache_gb ${PIXEL_CACHE_GB}") \
         $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
         2>&1 | tee "${LOG_FILE}"; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -286,14 +404,16 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 2: PIAA Pretraining (ICI & MIR Architecture Pretrain)
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "pretrain" ]; then
+if [ "${STAGE_FANOUT_DONE}" = false ] && { [ "${STAGE}" = "all" ] || [ "${STAGE}" = "pretrain" ]; }; then
   echo ""
   echo "======================================================================"
   echo "  [STAGE 2/4] PIAA Pretraining (ICI / MIR Pretraining on GIAA data)"
   echo "======================================================================"
   for F in "${ACTIVE_FOLDS[@]}"; do
+    JOB_SEQ=0
     for M in "${ALL_MODELS[@]}"; do
       for G in "${ALL_GENRES[@]}"; do
+        shard_skip && continue
         DATASET_VER="${DATASET_PREFIX}_fold${F}"
         LOG_FILE="${LOG_DIR}/${M}_pretrain_${G}_fold${F}.log"
         SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
@@ -322,6 +442,8 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "pretrain" ]; then
           --samples_root "${SAMPLES_ROOT}" \
           --rclone_remote "${REMOTE}" \
           --gdrive_folder_id "${FOLDER_ID}" \
+          $([ -n "${NUM_WORKERS}" ] && echo "--num_workers ${NUM_WORKERS}") \
+          $([ -n "${PIXEL_CACHE_GB}" ] && echo "--pixel_cache_gb ${PIXEL_CACHE_GB}") \
           $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
           2>&1 | tee "${LOG_FILE}"; then
           SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -340,7 +462,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 3: PIAA Fine-Tuning (User-Level Personalization)
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
+if [ "${STAGE_FANOUT_DONE}" = false ] && { [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; }; then
   echo ""
   echo "======================================================================"
   echo "  [STAGE 3/4] PIAA Fine-Tuning (Personalized User Finetune & Evaluation)"
@@ -351,8 +473,10 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
     echo "  📁 Processing Fold: v4_fold${F}"
     echo "----------------------------------------------------------------------"
 
+    JOB_SEQ=0
     for M in "${ALL_MODELS[@]}"; do
       for G in "${ALL_GENRES[@]}"; do
+        shard_skip && continue
         DATASET_VER="${DATASET_PREFIX}_fold${F}"
         LOG_FILENAME="${M}_finetune_${G}_fold${F}.log"
         LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
@@ -390,6 +514,8 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
           --samples_root "${SAMPLES_ROOT}" \
           --rclone_remote "${REMOTE}" \
           --gdrive_folder_id "${FOLDER_ID}" \
+          $([ -n "${NUM_WORKERS}" ] && echo "--num_workers ${NUM_WORKERS}") \
+          $([ -n "${PIXEL_CACHE_GB}" ] && echo "--pixel_cache_gb ${PIXEL_CACHE_GB}") \
           $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
           $([ "${KEEP_PTH}" = true ] && echo "--keep_finetune_pth") \
           2>&1 | tee "${LOG_FILE}"; then
@@ -415,7 +541,17 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
       echo "📦 [Fold v4_fold${F} Completed] Synchronizing reports and logs to Google Drive..."
       sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
       sync_gdrive "${LOG_DIR}/" "logs_v4/" "copy"
-      sync_gdrive "${MODELS_DIR}/" "models_pth/" "${PTH_SYNC_ACTION}" "--include *_finetune.pth"
+      # Scoped per (model, genre): with PTH_SYNC_ACTION=move, a wholesale sync of
+      # MODELS_DIR would carry off the sibling shard's in-flight checkpoints.
+      JOB_SEQ=0
+      for M in "${ALL_MODELS[@]}"; do
+        for G in "${ALL_GENRES[@]}"; do
+          shard_skip && continue
+          sync_gdrive "${MODELS_DIR}/${DATASET_PREFIX}_fold${F}/${G}/" \
+                      "models_pth/${DATASET_PREFIX}_fold${F}/${G}/" \
+                      "${PTH_SYNC_ACTION}" "--include *_${M}_*_finetune.pth"
+        done
+      done
       if [ "${KEEP_PTH}" = true ]; then
         echo "💾 [Retention] Local *_finetune.pth kept in ${MODELS_DIR} (--no-keep-pth to discard)"
       fi
@@ -426,7 +562,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 4: Aggregate Evaluation Metrics
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ] || [ "${STAGE}" = "agg" ]; then
+if [ "${RUN_AGG}" = true ] && { [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ] || [ "${STAGE}" = "agg" ]; }; then
   echo ""
   echo "======================================================================"
   echo "  [STAGE 4/4] Aggregate Metrics Across All Folds"
