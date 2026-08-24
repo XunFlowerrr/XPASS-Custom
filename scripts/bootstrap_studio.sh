@@ -27,17 +27,7 @@ mkdir -p "$HOME/bin" "$HOME/fleet/status"
 
 say() { echo "▶ $*"; }
 
-# ─── 1. Reclaim disk ──────────────────────────────────────────────────────────
-# setup_data.sh used to leave its archives behind: 3x5 GB of model zips plus a
-# 1.7 GB sample zip, all pure duplication once extracted. On the source studio
-# this halves what every duplicate has to copy.
-say "Reclaiming disk from extracted archives"
-for d in "$HOME" "$REPO_DIR"; do
-  rm -f "$d"/sample.zip "$d"/xpass_v4_essentials.zip \
-        "$d"/art_models_v4.zip "$d"/fashion_models_v4.zip "$d"/scenery_models_v4.zip 2>/dev/null || true
-done
-
-# ─── 2. rclone into $HOME/bin ─────────────────────────────────────────────────
+# ─── 1. rclone into $HOME/bin ─────────────────────────────────────────────────
 # Not `curl … | sudo bash`: that installs to /usr/bin, which does not persist.
 if command -v rclone >/dev/null 2>&1 && [ -x "$HOME/bin/rclone" ]; then
   say "rclone present ($(rclone version | head -1))"
@@ -51,7 +41,7 @@ else
   say "rclone installed ($(rclone version | head -1))"
 fi
 
-# ─── 3. uv into $HOME/.local/bin ──────────────────────────────────────────────
+# ─── 2. uv into $HOME/.local/bin ──────────────────────────────────────────────
 if command -v uv >/dev/null 2>&1; then
   say "uv present ($(uv --version))"
 else
@@ -59,7 +49,7 @@ else
   curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$HOME/.local/bin" sh
 fi
 
-# ─── 4. PATH for interactive shells ───────────────────────────────────────────
+# ─── 3. PATH for interactive shells ───────────────────────────────────────────
 # Every command the orchestrator sends carries its own export, because
 # Studio.run() may not source .bashrc. This is for humans who ssh in.
 LINE='export PATH="$HOME/bin:$HOME/.local/bin:$PATH"'
@@ -68,7 +58,7 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   grep -qF "$LINE" "$rc" || echo "$LINE" >> "$rc"
 done
 
-# ─── 5. rclone credentials ────────────────────────────────────────────────────
+# ─── 4. rclone credentials ────────────────────────────────────────────────────
 # The OAuth flow is interactive and must not be automated. The config lives in
 # $HOME, so it does survive restarts -- but a duplicated Studio may not have it.
 if [ ! -f "$HOME/.config/rclone/rclone.conf" ]; then
@@ -88,7 +78,7 @@ else
   exit 3
 fi
 
-# ─── 6. Pin the repo ──────────────────────────────────────────────────────────
+# ─── 5. Pin the repo ──────────────────────────────────────────────────────────
 # Detached HEAD on an exact SHA, so every machine in the fleet runs identical code.
 if [ ! -d "$REPO_DIR/.git" ]; then
   echo "❌ No git repository at $REPO_DIR" >&2
@@ -99,12 +89,12 @@ git -C "$REPO_DIR" fetch --all --prune --quiet
 git -C "$REPO_DIR" checkout --quiet --detach "$COMMIT"
 say "HEAD is now $(git -C "$REPO_DIR" rev-parse --short HEAD)"
 
-# ─── 7. Python environment ────────────────────────────────────────────────────
+# ─── 6. Python environment ────────────────────────────────────────────────────
 # Unconditional: .venv points into /system/conda and is gone after a restart.
 say "Syncing Python environment"
 ( cd "$REPO_DIR" && uv sync --quiet )
 
-# ─── 8. Verify data ───────────────────────────────────────────────────────────
+# ─── 7. Verify data ───────────────────────────────────────────────────────────
 # Same probes run_all.sh's check_dataset uses. A non-zero exit tells the
 # orchestrator this machine needs the setup_data.sh fallback.
 missing=0
@@ -124,7 +114,29 @@ if [ "$missing" -ne 0 ]; then
 fi
 say "Dataset and weights verified"
 
-# ─── 9. Marker ────────────────────────────────────────────────────────────────
+# ─── 9. Reclaim disk ──────────────────────────────────────────────────────────
+# setup_data.sh used to leave its archives behind: 3x5 GB of model zips plus a
+# 1.7 GB sample zip, all pure duplication once extracted. On the source studio
+# this halves what every duplicate has to copy.
+#
+# Deliberately after verification: deleting the archives while the extracted
+# data was actually incomplete would turn a recoverable state into a 17 GB
+# re-download.
+freed=0
+for d in "$HOME" "$REPO_DIR"; do
+  for z in sample.zip xpass_v4_essentials.zip \
+           art_models_v4.zip fashion_models_v4.zip scenery_models_v4.zip; do
+    if [ -f "$d/$z" ]; then
+      freed=$(( freed + $(wc -c < "$d/$z" | tr -d ' ') ))
+      rm -f "$d/$z"
+    fi
+  done
+done
+if [ "$freed" -gt 0 ]; then
+  say "Reclaimed $(( freed / 1024 / 1024 )) MB from extracted archives"
+fi
+
+# ─── 10. Marker ───────────────────────────────────────────────────────────────
 # An audit record, not a short-circuit: steps 2, 3 and 7 must re-run on every
 # start regardless, because the root filesystem was reset underneath them.
 {

@@ -145,31 +145,38 @@ def cmd_down(cfg: FleetConfig, args) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="fleet.cli", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--commit", default=None, help="SHA to pin (default: HEAD)")
-    p.add_argument("--machines", type=int, default=5)
-    p.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
-    p.add_argument("--shards", type=int, default=2, help="concurrent jobs per machine")
-    p.add_argument("--workers", type=int, default=4, help="DataLoader workers per shard")
-    p.add_argument("--poll", type=int, default=60)
-    p.add_argument("--max-runtime", default=None,
-                   help="hard ceiling per studio, e.g. 10h (default: none)")
-    p.add_argument("--no-verify-push", action="store_true",
-                   help="skip the check that the pinned commit is on a remote")
+    # Shared options are attached to the top level AND to every subcommand, so
+    # they work on either side of it -- `fleet.cli plan --machines 1` reads more
+    # naturally than argparse's default of demanding they come first.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--commit", default=None, help="SHA to pin (default: HEAD)")
+    common.add_argument("--machines", type=int, default=5)
+    common.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    common.add_argument("--shards", type=int, default=2,
+                        help="concurrent jobs per machine")
+    common.add_argument("--workers", type=int, default=4,
+                        help="DataLoader workers per shard")
+    common.add_argument("--poll", type=int, default=60)
+    common.add_argument("--max-runtime", default=None,
+                        help="hard ceiling per studio, e.g. 10h (default: none)")
+    common.add_argument("--no-verify-push", action="store_true",
+                        help="skip the check that the pinned commit is on a remote")
 
+    p = argparse.ArgumentParser(prog="fleet.cli", description=__doc__,
+                                parents=[common],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("plan")
-    up = sub.add_parser("up")
+    sub.add_parser("plan", parents=[common])
+    up = sub.add_parser("up", parents=[common])
     up.add_argument("--skip-source", action="store_true",
                     help="do not re-prepare the golden studio (use when re-attaching)")
-    stt = sub.add_parser("status")
+    stt = sub.add_parser("status", parents=[common])
     stt.add_argument("--tail", action="store_true", help="include cached log tails")
-    lg = sub.add_parser("logs")
+    lg = sub.add_parser("logs", parents=[common])
     lg.add_argument("machine")
     lg.add_argument("--lines", type=int, default=60)
-    sub.add_parser("collect")
-    sub.add_parser("down")
+    sub.add_parser("collect", parents=[common])
+    sub.add_parser("down", parents=[common])
 
     args = p.parse_args(argv)
     cfg = build_config(args)
