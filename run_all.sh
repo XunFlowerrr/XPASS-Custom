@@ -19,7 +19,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+cd "${SCRIPT_DIR}" || { echo "❌ cannot enter ${SCRIPT_DIR}" >&2; exit 1; }
 
 # ─── Default Configurations ───────────────────────────────────────────────────
 REMOTE="${RCLONE_REMOTE:-Google Drive}"
@@ -486,7 +486,7 @@ if [ "${STAGE_FANOUT_DONE}" = false ] && { [ "${STAGE}" = "all" ] || [ "${STAGE}
         # artifact. The previous version grepped the log for "Evaluation Results"
         # and "Test Average", neither of which any code in src/ ever prints, so no
         # job was ever skipped and every retry redid the whole fold.
-        REPORT_GLOB="${REPORTS_DIR}/exp/${DATASET_VER}/${G}/${G}_${M}_"*"_finetune.json"
+        REPORT_GLOB="${REPORTS_DIR}/exp/${DATASET_VER}/${G}/${G}_${M}_*_finetune.json"
         if [ "${FORCE}" = false ]; then
           if compgen -G "${REPORT_GLOB}" > /dev/null 2>&1 || \
              { [ -f "${LOG_FILE}" ] && grep -q "Test results saved to" "${LOG_FILE}" 2>/dev/null; }; then
