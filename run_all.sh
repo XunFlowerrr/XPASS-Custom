@@ -35,6 +35,7 @@ ROOT_DIR="Dataset"
 FORCE=false
 DRY_RUN=false
 NO_UPLOAD=false
+KEEP_PTH=true
 
 LOG_DIR="${SCRIPT_DIR}/logs_v4"
 REPORTS_DIR="${SCRIPT_DIR}/reports"
@@ -58,6 +59,7 @@ Options:
   --force                Force re-run even if outputs already exist
   --dry-run              Display planned execution plan without running
   --no-upload            Disable automated Google Drive synchronization
+  --no-keep-pth          Delete local *_finetune.pth after upload (default: keep them locally)
   -h, --help             Show this help message and exit
 
 Examples:
@@ -121,6 +123,10 @@ while [[ $# -gt 0 ]]; do
       NO_UPLOAD=true
       shift 1
       ;;
+    --no-keep-pth)
+      KEEP_PTH=false
+      shift 1
+      ;;
     -h|--help)
       usage
       ;;
@@ -130,6 +136,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ─── Local Checkpoint Retention ───────────────────────────────────────────────
+# KEEP_PTH=true  -> train_PIAA keeps *_finetune.pth, and rclone "copy" leaves the
+#                   local files in place after upload (default).
+# KEEP_PTH=false -> train_PIAA deletes them after inference, and rclone "move"
+#                   removes whatever is left once it reaches Google Drive.
+if [ "${KEEP_PTH}" = true ]; then
+  PTH_SYNC_ACTION="copy"
+else
+  PTH_SYNC_ACTION="move"
+fi
 
 # ─── Directories Setup ────────────────────────────────────────────────────────
 mkdir -p "${LOG_DIR}" "${REPORTS_DIR}" "${MODELS_DIR}"
@@ -369,6 +386,7 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
           --rclone_remote "${REMOTE}" \
           --gdrive_folder_id "${FOLDER_ID}" \
           $([ "${NO_UPLOAD}" = true ] && echo "--no_gdrive_upload") \
+          $([ "${KEEP_PTH}" = true ] && echo "--keep_finetune_pth") \
           2>&1 | tee "${LOG_FILE}"; then
 
           JOB_END_TIME=$(date +%s)
@@ -392,7 +410,10 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
       echo "📦 [Fold v4_fold${F} Completed] Synchronizing reports and logs to Google Drive..."
       sync_gdrive "${REPORTS_DIR}/" "reports/" "copy"
       sync_gdrive "${LOG_DIR}/" "logs_v4/" "copy"
-      sync_gdrive "${MODELS_DIR}/" "models_pth/" "move" "--include *_finetune.pth"
+      sync_gdrive "${MODELS_DIR}/" "models_pth/" "${PTH_SYNC_ACTION}" "--include *_finetune.pth"
+      if [ "${KEEP_PTH}" = true ]; then
+        echo "💾 [Retention] Local *_finetune.pth kept in ${MODELS_DIR} (--no-keep-pth to discard)"
+      fi
     fi
   done
 fi
