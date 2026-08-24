@@ -23,18 +23,30 @@
 
 ## Environment Setup
 
+### Using `uv` (Recommended)
+
+```bash
+# Install dependencies and sync virtual environment
+uv sync
+
+# Run scripts directly with uv
+uv run python -m src.train_GIAA --genre art
+```
+
+### Using standard `venv` / `pip`
+
 ```bash
 # Linux/macOS
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirement.txt
+pip install .
 ```
 
 ```powershell
 # Windows (PowerShell)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirement.txt
+pip install .
 ```
 ---
 
@@ -85,6 +97,7 @@ Trains NIMA (backbone + aesthetic score head) with EMD loss. Training, validatio
 | `--max_patience_epochs` | int | `10` | Early stopping patience (epochs) |
 | `--dropout` | float | `0.1` | Dropout rate |
 | `--num_workers` | int | `4` | DataLoader worker count |
+| `--device` | str | `auto` | Target device (`auto`: cuda/mps/cpu auto-detection, `cuda`, `mps`, `cpu`) |
 
 #### Example Commands
 
@@ -122,6 +135,7 @@ Initializes from a GIAA-trained NIMA and trains a personalized aesthetic assessm
 | `--max_patience_epochs` | int | `10` | Early stopping patience (epochs) |
 | `--dropout` | float | `0.1` | Dropout rate |
 | `--num_workers` | int | `4` | DataLoader worker count |
+| `--device` | str | `auto` | Target device (`auto`: cuda/mps/cpu auto-detection, `cuda`, `mps`, `cpu`) |
 | `--start_fold` | int | `1` | Fold number to resume from (used when `--dataset_ver` ends with `_all`) |
 | `--no_save_model` | flag | `False` | Keep best model in memory without saving to disk |
 | `--keep_finetune_pth` | flag | `False` | Retain `*_finetune.pth` files instead of deleting them after finetuning |

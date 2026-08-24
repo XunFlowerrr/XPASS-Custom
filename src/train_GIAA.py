@@ -6,7 +6,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from .argflags import parse_arguments, model_dir
+from .argflags import parse_arguments, model_dir, get_device
 from .data import load_data, collate_fn
 from .train_common import NIMA, num_bins
 from .methods import source_only
@@ -25,7 +25,8 @@ def run_main(args):
     experiment_name = f"{args.genre}_{method_tag}_PAA({run_name})"
     model_basename = f'{args.genre}_{method_tag}_NIMA_{run_name}.pth'
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device(getattr(args, 'device', 'auto'))
+    print(f"Using device: {device}")
     dirname = os.path.join(model_dir(args), args.genre)
     best_modelname = os.path.join(dirname, model_basename)
 

@@ -3,7 +3,7 @@ import copy
 from datetime import datetime
 import torch
 
-from .argflags import parse_arguments, model_dir, MODELS_ROOT
+from .argflags import parse_arguments, model_dir, MODELS_ROOT, get_device
 from .data import load_data, build_global_encoders
 from .train_common import discover_folds
 from .methods import source_only
@@ -81,7 +81,8 @@ def run_main(args):
     num_attr = len(_sample['QIP'])
     print(f"Detected num_pt={num_pt}, num_attr={num_attr} from dataset")
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device(getattr(args, 'device', 'auto'))
+    print(f"Using device: {device}")
     dirname = os.path.join(model_dir(args), genre)
     os.makedirs(dirname, exist_ok=True)
 

@@ -37,6 +37,8 @@ def parse_arguments(parse=True):
     parser.add_argument('--lr_patience', type=int, default=5)
     parser.add_argument('--no_save_model', action='store_true', default=False,
                         help='If set, keep best model in memory instead of saving to disk')
+    parser.add_argument('--device', type=str, default='auto',
+                        help="Target device ('auto', 'cuda', 'mps', 'cpu', or device identifier like 'cuda:0')")
 
     if parse:
         return parser.parse_args()
@@ -46,3 +48,27 @@ def parse_arguments(parse=True):
 def model_dir(args):
     # Model directory scoped by dataset version instead of fold
     return os.path.join(MODELS_ROOT, f'{args.dataset_ver}')
+
+
+def get_device(device_arg='auto'):
+    """Resolve target torch.device from device argument.
+
+    Supports:
+      - 'auto': automatically selects 'cuda' if available, else 'mps' (Apple Silicon), else 'cpu'
+      - 'cuda' / 'cuda:0' / etc.
+      - 'mps'
+      - 'cpu'
+    """
+    import torch
+
+    if isinstance(device_arg, torch.device):
+        return device_arg
+
+    if device_arg and device_arg != 'auto':
+        return torch.device(device_arg)
+
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')

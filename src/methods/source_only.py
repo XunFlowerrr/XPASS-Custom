@@ -1,4 +1,5 @@
 import os
+import contextlib
 
 import torch
 import torch.optim as optim
@@ -14,6 +15,38 @@ from ..data import collate_fn
 from ..evaluate import evaluate, evaluate_piaa
 
 
+def _get_autocast(device):
+    """Return an autocast context manager compatible with device (cuda, mps, cpu)."""
+    dev_type = device.type if isinstance(device, torch.device) else str(device)
+    if dev_type == 'cuda':
+        return autocast(device_type='cuda')
+    elif dev_type == 'mps':
+        try:
+            return autocast(device_type='mps')
+        except (TypeError, ValueError, RuntimeError):
+            return contextlib.nullcontext()
+    return contextlib.nullcontext()
+
+
+def _get_grad_scaler(device):
+    """Return a GradScaler compatible with device (cuda, mps, cpu)."""
+    dev_type = device.type if isinstance(device, torch.device) else str(device)
+    if dev_type == 'cuda':
+        return GradScaler('cuda')
+    elif dev_type == 'mps':
+        try:
+            return GradScaler('mps')
+        except (TypeError, ValueError, RuntimeError):
+            try:
+                return GradScaler('mps', enabled=False)
+            except (TypeError, ValueError, RuntimeError):
+                return GradScaler('cuda', enabled=False)
+    try:
+        return GradScaler('cpu', enabled=False)
+    except (TypeError, ValueError, RuntimeError):
+        return GradScaler('cuda', enabled=False)
+
+
 def setup(model, args, device):
     """No extra components for source-only training."""
     return {}
@@ -24,12 +57,13 @@ def _train_one_epoch(model, dataloader, optimizer, scaler, device, args, epoch: 
     running_emd_loss = 0.0
     desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
     progress_bar = tqdm(dataloader, leave=True, desc=desc, position=0, ncols=120, colour="#00ff00", ascii="-=")
+    autocast_ctx = _get_autocast(device)
     for sample in progress_bar:
         images = sample['image'].to(device)
         aesthetic_score_histogram = sample['Aesthetic'].to(device)
 
         optimizer.zero_grad()
-        with autocast('cuda'):
+        with autocast_ctx:
             aesthetic_logits = model(images)
             prob_aesthetic = F.softmax(aesthetic_logits, dim=1)
             loss = earth_mover_distance(prob_aesthetic, aesthetic_score_histogram).mean()
@@ -48,7 +82,7 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=args.lr_decay_factor, patience=args.lr_patience)
-    scaler = GradScaler('cuda')
+    scaler = _get_grad_scaler(device)
 
     best_val_emd = float('inf')
     patience = 0
@@ -77,7 +111,7 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
                 print(f"Validation loss has not decreased for {args.max_patience_epochs} epochs. Stopping training.")
                 break
 
-    model.load_state_dict(torch.load(best_modelname))
+    model.load_state_dict(torch.load(best_modelname, map_location=device))
 
 
 # ─── PIAA ─────────────────────────────────────────────────────────────────────
@@ -89,9 +123,9 @@ def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, ge
     running_direct = 0.0
     total_batches = 0
 
-    from torch.amp import autocast
     desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
     progress_bar = tqdm(total=len(dataloader), leave=True, desc=desc, position=0, ncols=120, colour="#00ff00", ascii="-=")
+    autocast_ctx = _get_autocast(device)
 
     for sample in dataloader:
         optimizer.zero_grad()
@@ -100,7 +134,7 @@ def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, ge
         sample_attr = sample['QIP'].float().to(device)
         aesthetic_scores = sample['Aesthetic'].to(device).view(-1, 1)
 
-        with autocast('cuda'):
+        with autocast_ctx:
             score_pred = model(images, sample_pt, sample_attr, genre)
             loss = F.mse_loss(score_pred, aesthetic_scores)
 
@@ -145,7 +179,7 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
     if not os.path.exists(pretrained_path):
         raise FileNotFoundError(f"Error: Pretrained NIMA model file not found: {pretrained_path}")
     try:
-        state = torch.load(pretrained_path)
+        state = torch.load(pretrained_path, map_location=device)
         model.nima_dict[genre].load_state_dict(state)
         print(f"Loaded NIMA weights for {genre} from {pretrained_path}")
     except Exception as e:
@@ -165,7 +199,7 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
     best_model_path = os.path.join(dirname, f'{genre_str}_{args.model_type}_{experiment_name}_pretrain.pth')
     best_state_dict = None
 
-    scaler = GradScaler('cuda')
+    scaler = _get_grad_scaler(device)
     for epoch in range(args.num_epochs):
         train_loss, _, _ = _train_one_epoch_piaa(model, train_loader, optimizer, scaler, device, args, genre, epoch=epoch)
         genre_metrics, val_mae = evaluate_piaa(model, val_loaders_dict, device, epoch=epoch, phase_name="Val")
@@ -238,7 +272,7 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         pretrained_path = pretrained_model_dict[genre]
         if pretrained_path is not None and os.path.exists(pretrained_path):
             try:
-                state = torch.load(pretrained_path)
+                state = torch.load(pretrained_path, map_location=device)
                 incompatible = model_user.load_state_dict(state, strict=False)
                 if incompatible.unexpected_keys:
                     print(f"[load_state_dict] Ignored unexpected keys: {incompatible.unexpected_keys}")
@@ -262,7 +296,7 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         patience = 0
         best_model_path = os.path.join(dirname, f'{genre_str}_{args.model_type}_user_{uid}_{experiment_name}_finetune.pth')
 
-        scaler = GradScaler('cuda')
+        scaler = _get_grad_scaler(device)
 
         # epoch 0 前に pretrain 重みを保存しておく:
         # val_ccc が一度も改善しない (NaN 等) ユーザーでも .pth が必ず存在し、

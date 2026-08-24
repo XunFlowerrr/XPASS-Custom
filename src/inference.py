@@ -182,7 +182,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
         best_model_path = os.path.join(dirname, f'{genre_str}_{args.model_type}_user_{uid}_{model_name_base}_finetune.pth')
         model_user = _build_eval_model(num_bins, num_attr, num_pt, genres, backbone_dict, args, device)
         try:
-            model_user.load_state_dict(torch.load(best_model_path))
+            model_user.load_state_dict(torch.load(best_model_path, map_location=device))
         except Exception as e:
             print(f"Warning: best model not found for user {uid} at {best_model_path}, skipping. Error: {e}")
             results[uid] = (np.nan, np.nan)
@@ -289,7 +289,7 @@ def evaluate_pretrain_on_val_piaa(datasets_dict_user, args, device, backbone_dic
     if model_state_dict is not None:
         model.load_state_dict(model_state_dict)
     else:
-        model.load_state_dict(torch.load(best_model_path))
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
 
     all_user_ids = set(datasets_dict_user[genre]['val'].data['user_id'].values)
     unique_user_ids = sorted(list(all_user_ids))
@@ -335,7 +335,7 @@ def inference_pretrain(datasets_dict, args, device, dirname, experiment_name, ba
     if model_state_dict is not None:
         model.load_state_dict(model_state_dict)
     else:
-        model.load_state_dict(torch.load(best_model_path))
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
 
     all_user_ids = set(datasets_dict[genre]['test'].data['user_id'].values)
     unique_user_ids = sorted(list(all_user_ids))

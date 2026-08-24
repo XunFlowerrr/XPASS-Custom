@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
+import contextlib
 from collections import defaultdict
 from tqdm import tqdm
 from scipy.stats import spearmanr, pearsonr
@@ -11,6 +12,19 @@ from sklearn.metrics import ndcg_score
 from .train_common import earth_mover_distance, num_bins
 
 _criterion_mse = nn.MSELoss()
+
+
+def _get_autocast(device):
+    """Return an autocast context manager compatible with device (cuda, mps, cpu)."""
+    dev_type = device.type if isinstance(device, torch.device) else str(device)
+    if dev_type == 'cuda':
+        return autocast(device_type='cuda')
+    elif dev_type == 'mps':
+        try:
+            return autocast(device_type='mps')
+        except (TypeError, ValueError, RuntimeError):
+            return contextlib.nullcontext()
+    return contextlib.nullcontext()
 
 
 def evaluate(model, dataloader, device, PIAA=False, epoch: int = None, phase_name: str = "Val"):
@@ -24,13 +38,14 @@ def evaluate(model, dataloader, device, PIAA=False, epoch: int = None, phase_nam
     mean_pred = []
     mean_target = []
     user_id_list = []
+    autocast_ctx = _get_autocast(device)
     with torch.no_grad():
         for sample in progress_bar:
             images = sample['image'].to(device)
             aesthetic_score_histogram = sample['Aesthetic'].to(device)
             if PIAA:
                 user_id_list.extend(sample['user_id'])
-            with autocast('cuda'):
+            with autocast_ctx:
                 aesthetic_logits = model(images)
                 prob_aesthetic = F.softmax(aesthetic_logits, dim=1)
                 loss = earth_mover_distance(prob_aesthetic, aesthetic_score_histogram).mean()
@@ -117,6 +132,7 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
     component_interaction = defaultdict(float)
     component_direct = defaultdict(float)
     component_batch_counts = defaultdict(int)
+    autocast_ctx = _get_autocast(device)
 
     with torch.no_grad():
         for genre, dataloader in dataloaders_dict.items():
@@ -132,7 +148,7 @@ def evaluate_piaa(model, dataloaders_dict, device, epoch: int = None, phase_name
                 if 'user_id' in sample:
                     genre_user_ids[genre].extend(_collect_user_ids(sample['user_id']))
 
-                with autocast('cuda'):
+                with autocast_ctx:
                     outputs = model(images, sample_pt, sample_attr, genre)
                 outputs = outputs.view(-1, 1)
                 genre_predictions[genre].append(outputs.view(-1).cpu().numpy())

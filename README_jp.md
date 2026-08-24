@@ -25,18 +25,30 @@
 
 ## 環境構築
 
+### `uv` を使用する場合（推奨）
+
+```bash
+# 仮想環境の作成と依存パッケージの同期
+uv sync
+
+# uv でスクリプトを直接実行
+uv run python -m src.train_GIAA --genre art
+```
+
+### 標準の `venv` / `pip` を使用する場合
+
 ```bash
 # Linux/macOS
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirement.txt
+pip install .
 ```
 
 ```powershell
 # Windows (PowerShell)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirement.txt
+pip install .
 ```
 ---
 
@@ -88,6 +100,7 @@ NIMA（バックボーン + 美的スコアヘッド）を EMD 損失で学習�
 | `--max_patience_epochs` | int | `10` | Early stoppingの忍耐エポック数 |
 | `--dropout` | float | `0.1` | ドロップアウト率 |
 | `--num_workers` | int | `4` | DataLoaderのワーカー数 |
+| `--device` | str | `auto` | 実行デバイス（`auto`: cuda/mps/cpu 自動検出, `cuda`, `mps`, `cpu`） |
 
 #### コマンド例
 
@@ -127,6 +140,7 @@ GIAA 学習済み NIMA を初期値として、個人化美的評価モデル（
 | `--max_patience_epochs` | int | `10` | Early stoppingの忍耐エポック数 |
 | `--dropout` | float | `0.1` | ドロップアウト率 |
 | `--num_workers` | int | `4` | DataLoaderのワーカー数 |
+| `--device` | str | `auto` | 実行デバイス（`auto`: cuda/mps/cpu 自動検出, `cuda`, `mps`, `cpu`） |
 | `--start_fold` | int | `1` | 再開するfold番号（`--dataset_ver` が `_all` の場合に使用） |
 | `--no_save_model` | flag | `False` | モデルをディスクに保存せず最良モデルをメモリに保持 |
 | `--keep_finetune_pth` | flag | `False` | finetune後に `*_finetune.pth` を削除せず残す |
