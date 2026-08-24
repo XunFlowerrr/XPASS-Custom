@@ -358,9 +358,14 @@ if [ "${STAGE}" = "all" ] || [ "${STAGE}" = "finetune" ]; then
         LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
         SAMPLES_ROOT="${ROOT_DIR}/sample/${G}_extracted"
 
-        # Smart Resume Check: check if already completed
-        if [ "${FORCE}" = false ] && [ -f "${LOG_FILE}" ]; then
-          if grep -q "Evaluation Results" "${LOG_FILE}" 2>/dev/null || grep -q "Test Average" "${LOG_FILE}" 2>/dev/null; then
+        # Smart Resume Check: the report JSON src/inference.py writes is the real
+        # artifact. The previous version grepped the log for "Evaluation Results"
+        # and "Test Average", neither of which any code in src/ ever prints, so no
+        # job was ever skipped and every retry redid the whole fold.
+        REPORT_GLOB="${REPORTS_DIR}/exp/${DATASET_VER}/${G}/${G}_${M}_"*"_finetune.json"
+        if [ "${FORCE}" = false ]; then
+          if compgen -G "${REPORT_GLOB}" > /dev/null 2>&1 || \
+             { [ -f "${LOG_FILE}" ] && grep -q "Test results saved to" "${LOG_FILE}" 2>/dev/null; }; then
             echo "⏩ [Finetune] Skipping already completed: ${DATASET_VER} | ${M} | ${G}"
             SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
             continue
