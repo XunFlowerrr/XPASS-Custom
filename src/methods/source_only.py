@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from ..train_common import earth_mover_distance, build_piaa_model, num_bins
 from ..data import collate_fn
 from ..evaluate import evaluate, evaluate_piaa
+from ..checkpoint_callback import safe_save_checkpoint, on_checkpoint_saved
 
 
 def _get_autocast(device):
@@ -116,8 +117,7 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
         if val_emd < best_val_emd:
             best_val_emd = val_emd
             patience = 0
-            os.makedirs(os.path.dirname(best_modelname), exist_ok=True)
-            torch.save(model.state_dict(), best_modelname)
+            safe_save_checkpoint(model.state_dict(), best_modelname)
         else:
             patience += 1
             if patience >= args.max_patience_epochs:
@@ -128,6 +128,9 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
         tracker.finish_model(early_stopped=(patience >= args.max_patience_epochs))
 
     model.load_state_dict(torch.load(best_modelname, map_location=device))
+    dataset_ver = getattr(args, 'dataset_ver', 'default')
+    genre = getattr(args, 'genre', 'default')
+    on_checkpoint_saved(best_modelname, dataset_ver, genre, args=args, is_temporary=False)
 
 
 # ─── PIAA ─────────────────────────────────────────────────────────────────────
@@ -252,7 +255,7 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
             if args.no_save_model:
                 best_state_dict = copy.deepcopy(model.state_dict())
             else:
-                torch.save(model.state_dict(), best_model_path)
+                safe_save_checkpoint(model.state_dict(), best_model_path)
         else:
             patience += 1
             if patience >= args.max_patience_epochs:
@@ -340,7 +343,7 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         # epoch 0 前に pretrain 重みを保存しておく:
         # val_ccc が一度も改善しない (NaN 等) ユーザーでも .pth が必ず存在し、
         # inference 時の "best model not found" によるユーザー欠損を防ぐ。
-        torch.save(model_user.state_dict(), best_model_path)
+        safe_save_checkpoint(model_user.state_dict(), best_model_path)
 
         for epoch in range(args.num_epochs):
             if tracker is not None:
@@ -366,11 +369,15 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
             if val_ccc > best_val_ccc:
                 best_val_ccc = val_ccc
                 patience = 0
-                torch.save(model_user.state_dict(), best_model_path)
+                safe_save_checkpoint(model_user.state_dict(), best_model_path)
             else:
                 patience += 1
                 if patience >= args.max_patience_epochs:
                     print(f"User {uid}: early stopping at epoch {epoch}")
                     break
+
         if tracker is not None:
             tracker.finish_model(early_stopped=(patience >= args.max_patience_epochs))
+
+        dataset_ver = getattr(args, 'dataset_ver', 'default')
+        on_checkpoint_saved(best_model_path, dataset_ver, genre, args=args, is_temporary=False)

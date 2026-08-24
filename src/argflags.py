@@ -39,6 +39,14 @@ def parse_arguments(parse=True):
                         help='If set, keep best model in memory instead of saving to disk')
     parser.add_argument('--device', type=str, default='auto',
                         help="Target device ('auto', 'cuda', 'mps', 'cpu', or device identifier like 'cuda:0')")
+    parser.add_argument('--rclone_remote', type=str, default='Google Drive',
+                        help='rclone remote name for Google Drive upload (default: "Google Drive")')
+    parser.add_argument('--gdrive_folder_id', type=str, default='1WfoO2zszob9rAe7ya8CkmBt6Ci7p070L',
+                        help='Target Google Drive folder ID for checkpoint upload')
+    parser.add_argument('--no_gdrive_upload', action='store_true', default=False,
+                        help='Disable automated Google Drive checkpoint upload')
+    parser.add_argument('--delete_local_on_upload', action='store_true', default=False,
+                        help='Delete local checkpoint files immediately after successful Google Drive upload')
 
     if parse:
         return parser.parse_args()
