@@ -1,0 +1,13 @@
+  Loaded: v4_fold1/art/art_ICI_Only_20260723_081323_finetune.json (26 users)
+  Loaded: v4_fold2/art/art_ICI_Only_20260723_084444_finetune.json (22 users)
+  Loaded: v4_fold3/art/art_ICI_Only_20260723_090120_finetune.json (23 users)
+  Loaded: v4_fold4/art/art_ICI_Only_20260723_064832_finetune.json (30 users)
+  Loaded: v4_fold5/art/art_ICI_Only_20260723_071818_finetune.json (28 users)
+
+=== Aggregated Results (v4, art, pattern='finetune') ===
+  Folds:           5
+  Total users:     129
+  Average MAE:     0.156129 (std: 0.040877)
+  Average NDCG@10: 0.842575 (std: 0.080186)
+  Average SROCC:   0.506027 (std: 0.168395)
+  Average CCC:     0.448082 (std: 0.171720)

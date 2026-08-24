@@ -1,0 +1,13 @@
+  Loaded: v4_fold1/fashion/fashion_MIR_Only_20260722_060418_finetune.json (26 users)
+  Loaded: v4_fold2/fashion/fashion_MIR_Only_20260722_062147_finetune.json (22 users)
+  Loaded: v4_fold3/fashion/fashion_MIR_Only_20260722_063205_finetune.json (23 users)
+  Loaded: v4_fold4/fashion/fashion_MIR_Only_20260722_064309_finetune.json (30 users)
+  Loaded: v4_fold5/fashion/fashion_MIR_Only_20260722_065717_finetune.json (28 users)
+
+=== Aggregated Results (v4, fashion, pattern='finetune') ===
+  Folds:           5
+  Total users:     129
+  Average MAE:     0.164832 (std: 0.050081)
+  Average NDCG@10: 0.773070 (std: 0.092729)
+  Average SROCC:   0.342771 (std: 0.156908)
+  Average CCC:     0.277632 (std: 0.139153)

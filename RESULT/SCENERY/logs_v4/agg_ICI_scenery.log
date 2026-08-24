@@ -1,0 +1,13 @@
+  Loaded: v4_fold1/scenery/scenery_ICI_Only_20260723_160814_finetune.json (26 users)
+  Loaded: v4_fold2/scenery/scenery_ICI_Only_20260723_164331_finetune.json (22 users)
+  Loaded: v4_fold3/scenery/scenery_ICI_Only_20260723_171520_finetune.json (23 users)
+  Loaded: v4_fold4/scenery/scenery_ICI_Only_20260723_173833_finetune.json (30 users)
+  Loaded: v4_fold5/scenery/scenery_ICI_Only_20260723_181259_finetune.json (28 users)
+
+=== Aggregated Results (v4, scenery, pattern='finetune') ===
+  Folds:           5
+  Total users:     129
+  Average MAE:     0.151752 (std: 0.042787)
+  Average NDCG@10: 0.843821 (std: 0.085251)
+  Average SROCC:   0.459672 (std: 0.181483)
+  Average CCC:     0.399467 (std: 0.166759)

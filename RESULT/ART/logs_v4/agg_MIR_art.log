@@ -1,0 +1,13 @@
+  Loaded: v4_fold1/art/art_MIR_Only_20260723_124237_finetune.json (26 users)
+  Loaded: v4_fold2/art/art_MIR_Only_20260723_125535_finetune.json (22 users)
+  Loaded: v4_fold3/art/art_MIR_Only_20260723_130240_finetune.json (23 users)
+  Loaded: v4_fold4/art/art_MIR_Only_20260723_131241_finetune.json (30 users)
+  Loaded: v4_fold5/art/art_MIR_Only_20260723_132337_finetune.json (28 users)
+
+=== Aggregated Results (v4, art, pattern='finetune') ===
+  Folds:           5
+  Total users:     129
+  Average MAE:     0.150767 (std: 0.037804)
+  Average NDCG@10: 0.845430 (std: 0.078542)
+  Average SROCC:   0.507809 (std: 0.164280)
+  Average CCC:     0.468443 (std: 0.164444)
