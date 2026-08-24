@@ -52,10 +52,13 @@ def setup(model, args, device):
     return {}
 
 
-def _train_one_epoch(model, dataloader, optimizer, scaler, device, args, epoch: int = None):
+def _train_one_epoch(model, dataloader, optimizer, scaler, device, args, epoch: int = None, tracker=None):
     model.train()
     running_emd_loss = 0.0
-    desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
+    if tracker is not None:
+        desc = tracker.get_full_header(phase="Train")
+    else:
+        desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
     progress_bar = tqdm(dataloader, leave=True, desc=desc, position=0, ncols=120, colour="#00ff00", ascii="-=")
     autocast_ctx = _get_autocast(device)
     for sample in progress_bar:
@@ -77,7 +80,7 @@ def _train_one_epoch(model, dataloader, optimizer, scaler, device, args, epoch: 
     return running_emd_loss / len(dataloader)
 
 
-def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components):
+def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components, tracker=None):
     train_dataloader, val_dataloader, _ = src_dataloaders
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -87,12 +90,22 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
     best_val_emd = float('inf')
     patience = 0
     for epoch in range(args.num_epochs):
-        train_emd = _train_one_epoch(model, train_dataloader, optimizer, scaler, device, args, epoch=epoch)
+        if tracker is not None:
+            tracker.start_epoch(epoch)
+
+        train_emd = _train_one_epoch(model, train_dataloader, optimizer, scaler, device, args, epoch=epoch, tracker=tracker)
 
         val_emd, val_srocc, _, val_mse, _, _, val_ccc = evaluate(
             model, val_dataloader, device, epoch=epoch, phase_name="Val")
+
+        if tracker is not None:
+            tracker.end_epoch(epoch)
+            timing_str = f"  {tracker.get_timing_info()}"
+        else:
+            timing_str = ""
+
         tqdm.write(f"[{args.genre}] epoch {epoch}  Train EMD {train_emd:.4f}  "
-                   f"Val EMD {val_emd:.4f}  SROCC {val_srocc:.4f}  CCC {val_ccc:.4f}")
+                   f"Val EMD {val_emd:.4f}  SROCC {val_srocc:.4f}  CCC {val_ccc:.4f}{timing_str}")
 
         prev_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_emd)
@@ -111,19 +124,25 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
                 print(f"Validation loss has not decreased for {args.max_patience_epochs} epochs. Stopping training.")
                 break
 
+    if tracker is not None:
+        tracker.finish_model(early_stopped=(patience >= args.max_patience_epochs))
+
     model.load_state_dict(torch.load(best_modelname, map_location=device))
 
 
 # ─── PIAA ─────────────────────────────────────────────────────────────────────
 
-def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, genre, epoch=None):
+def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, genre, epoch=None, tracker=None):
     model.train()
     running_loss = 0.0
     running_interaction = 0.0
     running_direct = 0.0
     total_batches = 0
 
-    desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
+    if tracker is not None:
+        desc = tracker.get_full_header(phase="Train")
+    else:
+        desc = f"Epoch {epoch} [Train]" if epoch is not None else "Train"
     progress_bar = tqdm(total=len(dataloader), leave=True, desc=desc, position=0, ncols=120, colour="#00ff00", ascii="-=")
     autocast_ctx = _get_autocast(device)
 
@@ -155,7 +174,7 @@ def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, ge
 
 
 def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
-                     num_attr, num_pt):
+                     num_attr, num_pt, tracker=None):
     """
     Pretrain trainer for a single genre.
     Trains on GIAA data with NIMA initialization, uses val GIAA data for early stopping.
@@ -201,8 +220,17 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
 
     scaler = _get_grad_scaler(device)
     for epoch in range(args.num_epochs):
-        train_loss, _, _ = _train_one_epoch_piaa(model, train_loader, optimizer, scaler, device, args, genre, epoch=epoch)
+        if tracker is not None:
+            tracker.start_epoch(epoch)
+
+        train_loss, _, _ = _train_one_epoch_piaa(model, train_loader, optimizer, scaler, device, args, genre, epoch=epoch, tracker=tracker)
         genre_metrics, val_mae = evaluate_piaa(model, val_loaders_dict, device, epoch=epoch, phase_name="Val")
+
+        if tracker is not None:
+            tracker.end_epoch(epoch)
+            timing_str = f"  {tracker.get_timing_info()}"
+        else:
+            timing_str = ""
 
         val_ccc = genre_metrics[genre]['ccc'] if genre in genre_metrics else -float('inf')
 
@@ -210,7 +238,7 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
             m = genre_metrics[genre]
             tqdm.write(f"[{genre}] epoch {epoch}  Train Loss {train_loss:.4f}  "
                        f"Val MAE {m['mae']:.4f}  SROCC {m['srocc']:.4f}  "
-                       f"NDCG@10 {m['ndcg@10']:.4f}  CCC {m['ccc']:.4f}")
+                       f"NDCG@10 {m['ndcg@10']:.4f}  CCC {m['ccc']:.4f}{timing_str}")
 
         prev_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_ccc)
@@ -231,11 +259,18 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
                 print(f"Pretrain: early stopping at epoch {epoch}")
                 break
 
+    if tracker is not None:
+        tracker.finish_model(early_stopped=(patience >= args.max_patience_epochs))
+
+    if not args.no_save_model:
+        dataset_ver = getattr(args, 'dataset_ver', 'default')
+        on_checkpoint_saved(best_model_path, dataset_ver, genre, args=args, is_temporary=False)
+
     return best_model_path, best_state_dict
 
 
 def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
-                     num_attr, num_pt):
+                     num_attr, num_pt, tracker=None):
     """
     Finetune trainer for a single genre, one model per user.
     """
@@ -247,8 +282,10 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
     all_user_ids = set(datasets_dict[genre]['train'].data['user_id'].values)
     unique_user_ids = sorted(list(all_user_ids))
 
-    for uid in unique_user_ids:
-        print(f"Training for user {uid}...")
+    for uid_idx, uid in enumerate(unique_user_ids):
+        print(f"Training for user {uid} ({uid_idx + 1}/{len(unique_user_ids)})...")
+        if tracker is not None:
+            tracker.set_context(model_idx=uid_idx + 1, model_name=str(uid))
 
         user_train_ds = copy.copy(datasets_dict[genre]['train'])
         user_train_ds.data = datasets_dict[genre]['train'].data[datasets_dict[genre]['train'].data['user_id'] == uid].reset_index(drop=True)
@@ -261,6 +298,8 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         print(f"User {uid}: train {total_train_samples} val {total_val_samples} samples")
         if total_train_samples == 0 or total_val_samples == 0:
             print(f"Skipping user {uid}: insufficient data")
+            if tracker is not None:
+                tracker.finish_model(early_stopped=True)
             continue
 
         train_loader = DataLoader(user_train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
@@ -304,8 +343,17 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         torch.save(model_user.state_dict(), best_model_path)
 
         for epoch in range(args.num_epochs):
-            train_loss, _, _ = _train_one_epoch_piaa(model_user, train_loader, optimizer_user, scaler, device, args, genre, epoch=epoch)
+            if tracker is not None:
+                tracker.start_epoch(epoch)
+
+            train_loss, _, _ = _train_one_epoch_piaa(model_user, train_loader, optimizer_user, scaler, device, args, genre, epoch=epoch, tracker=tracker)
             genre_metrics, val_mae = evaluate_piaa(model_user, val_loaders_dict, device, epoch=epoch, phase_name="Val")
+
+            if tracker is not None:
+                tracker.end_epoch(epoch)
+                timing_str = f"  {tracker.get_timing_info()}"
+            else:
+                timing_str = ""
 
             val_ccc = genre_metrics[genre]['ccc'] if genre in genre_metrics else -float('inf')
 
@@ -324,3 +372,5 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
                 if patience >= args.max_patience_epochs:
                     print(f"User {uid}: early stopping at epoch {epoch}")
                     break
+        if tracker is not None:
+            tracker.finish_model(early_stopped=(patience >= args.max_patience_epochs))

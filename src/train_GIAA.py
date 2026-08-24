@@ -8,12 +8,13 @@ from torch.utils.data import DataLoader
 
 from .argflags import parse_arguments, model_dir, get_device
 from .data import load_data, collate_fn
-from .train_common import NIMA, num_bins
+from .train_common import NIMA, num_bins, discover_folds
 from .methods import source_only
 from .inference import inference
+from .progress import ProgressTracker
 
 
-def run_main(args):
+def run_main(args, tracker=None):
     batch_size = args.batch_size
     print(args, flush=True)
 
@@ -47,7 +48,7 @@ def run_main(args):
                                   num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
     src_dataloaders = (train_giaa_loader, val_giaa_loader, test_piaa_loader)
 
-    source_only.trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components)
+    source_only.trainer(src_dataloaders, model, optimizer, args, device, best_modelname, components, tracker=tracker)
 
     inference(train_piaa_dataset, val_piaa_dataset, test_piaa_dataset,
               args, device, model, eval_split="Val",
@@ -59,8 +60,6 @@ def run_main(args):
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-from .train_common import discover_folds  # noqa: E402
-
 if __name__ == '__main__':
     args = parse_arguments()
 
@@ -71,11 +70,29 @@ if __name__ == '__main__':
     else:
         source_genres = [args.genre]
 
-    for source in source_genres:
+    # Pre-calculate total folds across genres
+    total_folds_per_genre = 1
+    if args.dataset_ver.endswith('_all'):
+        version_prefix = args.dataset_ver[:-4]
+        all_discovered = discover_folds(args.root_dir, version_prefix)
+        active_folds = [f for i, f in enumerate(all_discovered) if (i + 1) >= args.start_fold]
+        total_folds_per_genre = len(active_folds) if active_folds else 1
+
+    total_runs = len(source_genres) * total_folds_per_genre
+    tracker = ProgressTracker(
+        total_genres=len(source_genres),
+        total_folds=total_folds_per_genre,
+        total_models=total_runs,
+        max_epochs=args.num_epochs,
+        mode_name="GIAA Training"
+    )
+    tracker.print_initial_summary()
+
+    for g_idx, source in enumerate(source_genres):
         args_outer = copy.deepcopy(args)
         args_outer.genre = source
         if len(source_genres) > 1:
-            print(f"\n{'@'*60}\n  Genre: {source}\n{'@'*60}\n")
+            print(f"\n{'@'*60}\n  Genre: {source} ({g_idx + 1}/{len(source_genres)})\n{'@'*60}\n")
 
         if args_outer.dataset_ver.endswith('_all'):
             version_prefix = args_outer.dataset_ver[:-4]
@@ -84,14 +101,14 @@ if __name__ == '__main__':
                 raise ValueError(
                     f"No fold directories found for version '{version_prefix}' in "
                     f"{os.path.join(args_outer.root_dir, 'split')}")
-            print(f"Running all {len(folds)} folds sequentially: {folds}")
-            for i, fold in enumerate(folds):
-                if i + 1 < args_outer.start_fold:
-                    print(f"Skipping fold {i+1}/{len(folds)}: {fold} (start_fold={args_outer.start_fold})")
-                    continue
-                print(f"\n{'='*60}\n  Fold {i+1}/{len(folds)}: {fold}\n{'='*60}\n")
+            active_folds = [f for i, f in enumerate(folds) if (i + 1) >= args_outer.start_fold]
+            print(f"Running {len(active_folds)} folds sequentially: {active_folds}")
+            for f_idx, fold in enumerate(active_folds):
+                print(f"\n{'='*60}\n  Fold {f_idx + 1}/{len(active_folds)}: {fold}\n{'='*60}\n")
                 args_fold = copy.deepcopy(args_outer)
                 args_fold.dataset_ver = fold
-                run_main(args_fold)
+                tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=f_idx + 1, fold_name=fold)
+                run_main(args_fold, tracker=tracker)
         else:
-            run_main(args_outer)
+            tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=1, fold_name=args_outer.dataset_ver)
+            run_main(args_outer, tracker=tracker)

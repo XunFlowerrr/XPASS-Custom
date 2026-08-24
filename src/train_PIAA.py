@@ -1,16 +1,27 @@
 import os
 import copy
-from datetime import datetime
-import torch
-
 from .argflags import parse_arguments, model_dir, MODELS_ROOT, get_device
 from .data import load_data, build_global_encoders
 from .train_common import discover_folds
 from .methods import source_only
 from .inference import inference_finetune, evaluate_pretrain_on_val_piaa, inference_pretrain
+from .progress import ProgressTracker
 
 num_attr = None  # Determined dynamically from dataset
 num_pt = None    # Determined dynamically from dataset
+
+
+def count_users_for_run(root_dir, fold, genre):
+    """Count unique user IDs in train_PIAA.txt for a fold/genre if available."""
+    split_file = os.path.join(root_dir, 'split', fold, genre, 'train_PIAA.txt')
+    if os.path.exists(split_file):
+        try:
+            with open(split_file, 'r') as f:
+                lines = [line.strip().split()[0] for line in f if line.strip() and len(line.strip().split()) >= 2]
+            return len(set(lines))
+        except Exception:
+            return 0
+    return 0
 
 
 def discover_pretrained_models(dataset_ver, genre, piaa_mode='PIAA_finetune', model_type=None):
@@ -45,7 +56,7 @@ def discover_pretrained_models(dataset_ver, genre, piaa_mode='PIAA_finetune', mo
             raise FileNotFoundError(f"No pretrain pth file found in {genre_dir}")
 
 
-def run_main(args):
+def run_main(args, tracker=None):
     global num_pt, num_attr
 
     genre = args.genre.strip()
@@ -89,13 +100,13 @@ def run_main(args):
     if args.piaa_mode == 'PIAA_pretrain':
         best_model_path, best_state_dict = source_only.trainer_pretrain(
             datasets_dict, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
-            num_attr, num_pt)
+            num_attr, num_pt, tracker=tracker)
         evaluate_pretrain_on_val_piaa(datasets_dict_user, args, device, backbone_dict, best_model_path, model_state_dict=best_state_dict)
         inference_pretrain(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict, best_model_path, model_state_dict=best_state_dict)
     elif args.piaa_mode == 'PIAA_finetune':
         source_only.trainer_finetune(
             datasets_dict_user, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
-            num_attr, num_pt)
+            num_attr, num_pt, tracker=tracker)
         inference_finetune(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict)
         if not args.keep_finetune_pth:
             for pth_file in [f for f in os.listdir(dirname) if f.endswith('_finetune.pth')]:
@@ -105,6 +116,7 @@ def run_main(args):
             print(f"Kept finetune model files in {dirname} (--keep_finetune_pth)")
     else:
         raise ValueError(f"Error: --piaa_mode must be 'PIAA_pretrain' or 'PIAA_finetune', got: {args.piaa_mode}")
+
 
 if __name__ == '__main__':
     parser = parse_arguments(parse=False)
@@ -128,28 +140,56 @@ if __name__ == '__main__':
     else:
         source_genres = [args.genre]
 
+    # Pre-calculate scheduled runs
+    scheduled_runs = []
     for source in source_genres:
+        if args.dataset_ver.endswith('_all'):
+            version_prefix = args.dataset_ver[:-4]
+            folds = discover_folds(args.root_dir, version_prefix)
+            active_folds = [f for i, f in enumerate(folds) if (i + 1) >= args.start_fold]
+            for f in active_folds:
+                scheduled_runs.append((source, f))
+        else:
+            scheduled_runs.append((source, args.dataset_ver))
+
+    # Pre-calculate total models / users
+    if args.piaa_mode == 'PIAA_finetune':
+        total_models = sum(count_users_for_run(args.root_dir, f, g) for g, f in scheduled_runs)
+        if total_models == 0:
+            total_models = len(scheduled_runs)
+    else:
+        total_models = len(scheduled_runs)
+
+    tracker = ProgressTracker(
+        total_genres=len(source_genres),
+        total_folds=max(1, len(scheduled_runs) // len(source_genres)),
+        total_models=total_models,
+        max_epochs=args.num_epochs,
+        mode_name=f"PIAA {args.piaa_mode} ({args.model_type})"
+    )
+    tracker.print_initial_summary()
+
+    for g_idx, source in enumerate(source_genres):
         args_outer = copy.deepcopy(args)
         args_outer.genre = source
         if len(source_genres) > 1:
-            print(f"\n{'@'*60}\n  Genre: {source}\n{'@'*60}\n")
+            print(f"\n{'@'*60}\n  Genre: {source} ({g_idx + 1}/{len(source_genres)})\n{'@'*60}\n")
 
         if args_outer.dataset_ver.endswith('_all'):
             version_prefix = args_outer.dataset_ver[:-4]
             folds = discover_folds(args_outer.root_dir, version_prefix)
             if not folds:
                 raise ValueError(f"No fold directories found for version '{version_prefix}' in {os.path.join(args_outer.root_dir, 'split')}")
-            print(f"Running all {len(folds)} folds sequentially: {folds}")
-            for i, fold in enumerate(folds):
-                if i + 1 < args_outer.start_fold:
-                    print(f"Skipping fold {i+1}/{len(folds)}: {fold} (start_fold={args_outer.start_fold})")
-                    continue
+            active_folds = [f for i, f in enumerate(folds) if (i + 1) >= args_outer.start_fold]
+            print(f"Running all {len(active_folds)} folds sequentially: {active_folds}")
+            for f_idx, fold in enumerate(active_folds):
                 print(f"\n{'='*60}")
-                print(f"  Fold {i+1}/{len(folds)}: {fold}")
+                print(f"  Fold {f_idx + 1}/{len(active_folds)}: {fold}")
                 print(f"{'='*60}\n")
                 args_fold = copy.deepcopy(args_outer)
                 args_fold.dataset_ver = fold
-                run_main(args_fold)
+                tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=f_idx + 1, fold_name=fold)
+                run_main(args_fold, tracker=tracker)
         else:
             models_base = MODELS_ROOT
             fold_dirs = sorted([
@@ -159,15 +199,15 @@ if __name__ == '__main__':
 
             if fold_dirs:
                 print(f"{MODELS_ROOT}/{args_outer.dataset_ver}/ not found. Running fold structure: {fold_dirs}")
-                for i, fold in enumerate(fold_dirs):
-                    if i + 1 < args_outer.start_fold:
-                        print(f"Skipping fold {i+1}/{len(fold_dirs)}: {fold} (start_fold={args_outer.start_fold})")
-                        continue
+                active_folds = [f for i, f in enumerate(fold_dirs) if (i + 1) >= args_outer.start_fold]
+                for f_idx, fold in enumerate(active_folds):
                     print(f"\n{'='*60}")
-                    print(f"  Fold {i+1}/{len(fold_dirs)}: {fold}")
+                    print(f"  Fold {f_idx + 1}/{len(active_folds)}: {fold}")
                     print(f"{'='*60}\n")
                     args_fold = copy.deepcopy(args_outer)
                     args_fold.dataset_ver = fold
-                    run_main(args_fold)
+                    tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=f_idx + 1, fold_name=fold)
+                    run_main(args_fold, tracker=tracker)
             else:
-                run_main(args_outer)
+                tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=1, fold_name=args_outer.dataset_ver)
+                run_main(args_outer, tracker=tracker)
