@@ -7,10 +7,9 @@ from datetime import datetime
 from collections import defaultdict
 
 import torch
-from torch.utils.data import DataLoader
 
-from .data import collate_fn
-from .train_common import num_bins
+from .data import make_loader
+from .train_common import num_bins, is_trainable_only_state, FROZEN_STATE_PREFIX
 from .argflags import REPORTS_ROOT
 
 
@@ -66,7 +65,7 @@ def inference(train_dataset, val_dataset, test_dataset, args, device, model, eva
             print(f"No test samples for user {uid}, skipping.")
             continue
 
-        user_test_loader = DataLoader(user_test_ds, batch_size=batch_size, shuffle=False, num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
+        user_test_loader = make_loader(user_test_ds, batch_size, args.num_workers)
         _, _, final_srocc, final_mse, final_ndcg, final_mae, final_ccc = evaluate(model, user_test_loader, device, PIAA=True)
 
         user_sroccs.append(final_srocc if final_srocc is not None else np.nan)
@@ -138,7 +137,8 @@ def inference(train_dataset, val_dataset, test_dataset, args, device, model, eva
     return mean_user_srocc, mean_user_mse
 
 
-def inference_finetune(datasets_dict, args, device, dirname, experiment_name, backbone_dict):
+def inference_finetune(datasets_dict, args, device, dirname, experiment_name, backbone_dict,
+                       pretrained_model_dict=None):
     """
     Inference for all users after finetuning.
     Args:
@@ -148,6 +148,9 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
         dirname: directory name for saving models
         experiment_name: experiment name
         backbone_dict: dict of {genre: backbone_type}
+        pretrained_model_dict: {genre: path} to the PIAA pretrain checkpoint. Finetune
+            checkpoints only store the trainable half, so the frozen NIMA weights are
+            restored from here. Discovered automatically when omitted.
     """
     from . import train_PIAA as _tp
     from .evaluate import evaluate_piaa as evaluate
@@ -177,12 +180,38 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
 
     results = {}
 
+    # One model and one copy of the frozen NIMA weights for every user: the
+    # backbone is identical across users, so rebuilding CLIP per user only costs
+    # time. Each user's checkpoint then supplies the trainable half on top.
+    model_user = _build_eval_model(num_bins, num_attr, num_pt, genres, backbone_dict, args, device)
+
+    if pretrained_model_dict is None:
+        pretrained_model_dict = _tp.discover_pretrained_models(
+            args.dataset_ver, genres[0], 'PIAA_finetune', getattr(args, 'model_type', None))
+    base_state = torch.load(pretrained_model_dict[genres[0]], map_location=device)
+
+    # Sharing one model across users relies on base_state covering every frozen
+    # tensor; anything it misses would otherwise keep the previous user's values.
+    missing_frozen = [k for k in model_user.state_dict()
+                      if k.startswith(FROZEN_STATE_PREFIX) and k not in base_state]
+    if missing_frozen:
+        print(f"[Reuse] Pretrain checkpoint is missing {len(missing_frozen)} frozen key(s) "
+              f"(e.g. {missing_frozen[:3]}); rebuilding the model per user.")
+
     for uid in sorted(list(all_user_ids)):
         print(f"Running inference for user {uid} using saved best model...")
         best_model_path = os.path.join(dirname, f'{genre_str}_{args.model_type}_user_{uid}_{model_name_base}_finetune.pth')
-        model_user = _build_eval_model(num_bins, num_attr, num_pt, genres, backbone_dict, args, device)
+        if missing_frozen:
+            model_user = _build_eval_model(num_bins, num_attr, num_pt, genres, backbone_dict, args, device)
         try:
-            model_user.load_state_dict(torch.load(best_model_path, map_location=device))
+            user_state = torch.load(best_model_path, map_location=device)
+            if is_trainable_only_state(user_state):
+                # Frozen half from the pretrain checkpoint, trainable half from the user.
+                model_user.load_state_dict(base_state, strict=False)
+                model_user.load_state_dict(user_state, strict=False)
+            else:
+                # Full checkpoint written by an older run.
+                model_user.load_state_dict(user_state)
         except Exception as e:
             print(f"Warning: best model not found for user {uid} at {best_model_path}, skipping. Error: {e}")
             results[uid] = (np.nan, np.nan)
@@ -195,8 +224,7 @@ def inference_finetune(datasets_dict, args, device, dirname, experiment_name, ba
             user_test_ds = copy.copy(datasets_dict[genre]['test'])
             user_test_ds.data = datasets_dict[genre]['test'].data[datasets_dict[genre]['test'].data['user_id'] == uid].reset_index(drop=True)
             if len(user_test_ds) > 0:
-                test_loaders_dict[genre] = DataLoader(user_test_ds, batch_size=batch_size, shuffle=False,
-                                                       num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
+                test_loaders_dict[genre] = make_loader(user_test_ds, batch_size, args.num_workers)
                 total_test_samples += len(user_test_ds)
         if total_test_samples == 0:
             print(f"No test samples for user {uid}, skipping.")
@@ -299,8 +327,7 @@ def evaluate_pretrain_on_val_piaa(datasets_dict_user, args, device, backbone_dic
         user_val_ds = copy.copy(datasets_dict_user[genre]['val'])
         user_val_ds.data = datasets_dict_user[genre]['val'].data[datasets_dict_user[genre]['val'].data['user_id'] == uid].reset_index(drop=True)
         if len(user_val_ds) > 0:
-            val_loaders_dict = {genre: DataLoader(user_val_ds, batch_size=batch_size, shuffle=False,
-                                                   num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+            val_loaders_dict = {genre: make_loader(user_val_ds, batch_size, args.num_workers)}
             genre_metrics, _ = evaluate(model, val_loaders_dict, device)
             user_metrics[uid] = genre_metrics
 
@@ -350,8 +377,7 @@ def inference_pretrain(datasets_dict, args, device, dirname, experiment_name, ba
         user_test_ds = copy.copy(datasets_dict[genre]['test'])
         user_test_ds.data = datasets_dict[genre]['test'].data[datasets_dict[genre]['test'].data['user_id'] == uid].reset_index(drop=True)
         if len(user_test_ds) > 0:
-            test_loaders_dict = {genre: DataLoader(user_test_ds, batch_size=batch_size, shuffle=False,
-                                                    num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+            test_loaders_dict = {genre: make_loader(user_test_ds, batch_size, args.num_workers)}
             genre_metrics, total_mae = evaluate(model, test_loaders_dict, device)
             for g, metrics in genre_metrics.items():
                 genre_srocc_list[g].append(metrics['srocc'])

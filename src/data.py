@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import copy
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
@@ -51,6 +51,7 @@ class ImageDataset(Dataset):
         self.transform = transform
         self.is_train = is_train
         self.maked_dir = os.path.join(root_dir, 'maked')
+        self._pixel_cache = None
 
         self.ratings_data = pd.read_csv(os.path.join(self.maked_dir, 'ratings.csv'))
         self.ratings_data = self.ratings_data[self.ratings_data['genre'] == self.genre]
@@ -126,6 +127,56 @@ class ImageDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def _resolve_sample(self, idx):
+        """Return (sample_file, sample_path) for a row.
+
+        For scenery, samples_dir already includes the genre (scenery_image) and the
+        raw filenames may be .mp4 while the frames on disk are .jpg. Every other
+        genre keeps the genre as a directory level under samples_dir.
+        """
+        sample_file = self.data.iloc[idx]['sample_file']
+        if self.genre == 'scenery':
+            if sample_file.endswith('.mp4'):
+                sample_file = sample_file.replace('.mp4', '.jpg')
+            return sample_file, os.path.join(self.samples_dir, sample_file)
+        return sample_file, os.path.join(self.samples_dir, self.genre, sample_file)
+
+    def _open_image(self, path):
+        if self._pixel_cache is not None:
+            raw = self._pixel_cache.get(path)
+            if raw is not None:
+                return Image.fromarray(raw)
+        return Image.open(path).convert('RGB')
+
+    def warm_pixel_cache(self, max_bytes):
+        """Decode the images this dataset serves once, instead of every epoch.
+
+        Called from the parent process before the DataLoader forks its workers, so
+        the workers share the pixels copy-on-write. The transform still runs on
+        every access, so augmentation is drawn exactly as it is without the cache;
+        only the repeated JPEG decode disappears. Images past `max_bytes` are left
+        out and fall back to reading from disk.
+
+        Returns the number of bytes cached.
+        """
+        if not max_bytes:
+            return 0
+        cache, total = {}, 0
+        for idx in range(len(self.data)):
+            _, path = self._resolve_sample(idx)
+            if path in cache:
+                continue
+            try:
+                raw = np.asarray(Image.open(path).convert('RGB'))
+            except (OSError, ValueError):
+                continue  # let __getitem__ raise it with the surrounding context
+            if total + raw.nbytes > max_bytes:
+                break
+            cache[path] = raw
+            total += raw.nbytes
+        self._pixel_cache = cache
+        return total
+
     def __getitem__(self, idx):
 
         sample = {
@@ -150,20 +201,11 @@ class ImageDataset(Dataset):
         for trait in self.encoded_trait_columns:
             del sample[trait]
 
-        # For scenery, samples_dir already includes genre info (scenery_image)
-        # For other genres, append genre to samples_dir
-        sample_file = self.data.iloc[idx]['sample_file']
-        if self.genre == 'scenery':
-            # scenery raw filenames may be .mp4; the image frames are stored as .jpg
-            if sample_file.endswith('.mp4'):
-                sample_file = sample_file.replace('.mp4', '.jpg')
-            sample_path = os.path.join(self.samples_dir, sample_file)
-        else:
-            sample_path = os.path.join(self.samples_dir, self.genre, sample_file)
+        sample_file, sample_path = self._resolve_sample(idx)
         sample['sample_path'] = sample_path
         sample['sample_file'] = sample_file
 
-        sample['image'] = Image.open(sample_path).convert('RGB')
+        sample['image'] = self._open_image(sample_path)
         if self.transform:
             sample['image'] = self.transform(sample['image'])
 
@@ -553,6 +595,25 @@ def collate_fn(batch):
                 # fallback: collect as list (for non-tensor items)
                 batch_dict[k] = [item[k] for item in batch]
     return batch_dict
+
+def make_loader(dataset, batch_size, num_workers, *, shuffle=False, drop_last=False,
+                reused=False):
+    """Build a DataLoader with the options this pipeline needs for throughput.
+
+    `reused=True` marks a loader iterated once per epoch. Its workers stay alive
+    between epochs, which matters because each user trains on a few hundred images
+    and re-spawning the pool every epoch costs more than the decoding it does --
+    raising num_workers without this is a net slowdown. Single-pass loaders keep
+    the default so their workers are torn down as soon as the loader is dropped.
+    """
+    kwargs = dict(batch_size=batch_size, shuffle=shuffle, drop_last=drop_last,
+                  num_workers=num_workers, collate_fn=collate_fn)
+    if num_workers > 0:
+        kwargs.update(timeout=300, prefetch_factor=4, persistent_workers=reused)
+    if torch.cuda.is_available():
+        kwargs['pin_memory'] = True
+    return DataLoader(dataset, **kwargs)
+
 
 class Image_PIAA_HistogramDataset(ImageDataset):
     def __init__(self, root_dir, transform=None, data=None, genre=None, backbone=None, is_train=False,

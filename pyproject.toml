@@ -20,6 +20,11 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+# Only the orchestrating machine needs this. Keeping it out of the default
+# groups means `uv sync` on a studio never installs it.
+fleet = [
+    "lightning-sdk>=0.1",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

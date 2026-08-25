@@ -8,10 +8,9 @@ from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
 import copy
-from torch.utils.data import DataLoader
 
-from ..train_common import earth_mover_distance, build_piaa_model, num_bins
-from ..data import collate_fn
+from ..train_common import earth_mover_distance, build_piaa_model, num_bins, trainable_state
+from ..data import make_loader
 from ..evaluate import evaluate, evaluate_piaa
 from ..checkpoint_callback import safe_save_checkpoint, on_checkpoint_saved
 
@@ -75,8 +74,9 @@ def _train_one_epoch(model, dataloader, optimizer, scaler, device, args, epoch: 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        running_emd_loss += loss.item()
-        progress_bar.set_postfix({'Train EMD': loss.item()})
+        loss_val = loss.item()
+        running_emd_loss += loss_val
+        progress_bar.set_postfix({'Train EMD': loss_val})
 
     return running_emd_loss / len(dataloader)
 
@@ -138,8 +138,6 @@ def trainer(src_dataloaders, model, optimizer, args, device, best_modelname, com
 def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, genre, epoch=None, tracker=None):
     model.train()
     running_loss = 0.0
-    running_interaction = 0.0
-    running_direct = 0.0
     total_batches = 0
 
     if tracker is not None:
@@ -164,16 +162,15 @@ def _train_one_epoch_piaa(model, dataloader, optimizer, scaler, device, args, ge
         scaler.step(optimizer)
         scaler.update()
 
-        running_loss += loss.item()
-        running_interaction += getattr(model, '_last_interaction_mean', 0.0)
-        running_direct += getattr(model, '_last_direct_mean', 0.0)
+        loss_val = loss.item()
+        running_loss += loss_val
         total_batches += 1
         progress_bar.update(1)
-        progress_bar.set_postfix({'loss': loss.item()})
+        progress_bar.set_postfix({'loss': loss_val})
 
     progress_bar.close()
     n = total_batches if total_batches > 0 else 1
-    return running_loss / n, running_interaction / n, running_direct / n
+    return running_loss / n
 
 
 def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
@@ -190,10 +187,15 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
     genre = genres[0]
     genre_str = genre
 
-    train_loader = DataLoader(datasets_dict[genre]['train'], batch_size=batch_size, shuffle=True,
-                              drop_last=True, num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-    val_loaders_dict = {genre: DataLoader(datasets_dict[genre]['val'], batch_size=batch_size, shuffle=False,
-                                          num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+    _cache_bytes = int(getattr(args, 'pixel_cache_gb', 0.0) * 1024 ** 3)
+    if _cache_bytes:
+        _mb = (datasets_dict[genre]['train'].warm_pixel_cache(_cache_bytes)
+               + datasets_dict[genre]['val'].warm_pixel_cache(_cache_bytes)) / 1e6
+        print(f"[PixelCache] Decoded {_mb:.0f} MB of images once; epochs reuse them.")
+    train_loader = make_loader(datasets_dict[genre]['train'], batch_size, args.num_workers,
+                               shuffle=True, drop_last=True, reused=True)
+    val_loaders_dict = {genre: make_loader(datasets_dict[genre]['val'], batch_size,
+                                           args.num_workers, reused=True)}
 
     model = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
 
@@ -226,7 +228,7 @@ def trainer_pretrain(datasets_dict, args, device, dirname, experiment_name, back
         if tracker is not None:
             tracker.start_epoch(epoch)
 
-        train_loss, _, _ = _train_one_epoch_piaa(model, train_loader, optimizer, scaler, device, args, genre, epoch=epoch, tracker=tracker)
+        train_loss = _train_one_epoch_piaa(model, train_loader, optimizer, scaler, device, args, genre, epoch=epoch, tracker=tracker)
         genre_metrics, val_mae = evaluate_piaa(model, val_loaders_dict, device, epoch=epoch, phase_name="Val")
 
         if tracker is not None:
@@ -284,6 +286,39 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
 
     all_user_ids = set(datasets_dict[genre]['train'].data['user_id'].values)
     unique_user_ids = sorted(list(all_user_ids))
+    _cache_bytes = int(getattr(args, 'pixel_cache_gb', 0.0) * 1024 ** 3)
+
+    pretrained_path = pretrained_model_dict[genre]
+    if pretrained_path is None or not os.path.exists(pretrained_path):
+        raise FileNotFoundError(f"Error: Pretrained model file not found: {pretrained_path}")
+
+    # Build the model and read the pretrain checkpoint once instead of once per
+    # user: every user starts from the same weights, and `create_model_and_transforms`
+    # rebuilds an 86M-parameter CLIP tower each time it is called.
+    model_user = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
+    try:
+        base_state = torch.load(pretrained_path, map_location=device)
+    except Exception as e:
+        raise RuntimeError(f"Error: Failed to load model weights from {pretrained_path}: {e}")
+
+    incompatible = model_user.load_state_dict(base_state, strict=False)
+    if incompatible.unexpected_keys:
+        print(f"[load_state_dict] Ignored unexpected keys: {incompatible.unexpected_keys}")
+    print(f"Loaded PIAA weights from {pretrained_path}")
+
+    # Reusing one model object is only equivalent to rebuilding it per user when
+    # the checkpoint covers every key -- otherwise the keys it misses would carry
+    # the previous user's trained values instead of a fresh initialization.
+    reuse_model = not incompatible.missing_keys
+    if not reuse_model:
+        print(f"[Reuse] Checkpoint is missing {len(incompatible.missing_keys)} key(s) "
+              f"(e.g. {incompatible.missing_keys[:3]}); rebuilding the model per user "
+              f"to keep initialization semantics unchanged.")
+
+    _full_state = model_user.state_dict()
+    _kept = len(trainable_state(_full_state))
+    print(f"[Checkpoint] Saving {_kept} trainable tensors per user; the remaining "
+          f"{len(_full_state) - _kept} frozen tensors are restored from the pretrain checkpoint at load time.")
 
     for uid_idx, uid in enumerate(unique_user_ids):
         print(f"Training for user {uid} ({uid_idx + 1}/{len(unique_user_ids)})...")
@@ -305,24 +340,24 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
                 tracker.finish_model(early_stopped=True)
             continue
 
-        train_loader = DataLoader(user_train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
-                                  num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)
-        val_loaders_dict = {genre: DataLoader(user_val_ds, batch_size=batch_size, shuffle=False,
-                                              num_workers=args.num_workers, timeout=(300 if args.num_workers > 0 else 0), collate_fn=collate_fn)}
+        # Decode this user's images once here, in the parent, so the forked workers
+        # share them; every epoch would otherwise re-read the same few hundred JPEGs.
+        _cached = (user_train_ds.warm_pixel_cache(_cache_bytes)
+                   + user_val_ds.warm_pixel_cache(_cache_bytes))
+        if uid == unique_user_ids[0] and _cached:
+            print(f"[PixelCache] {_cached / 1e6:.0f} MB per user held in RAM across epochs.")
+        train_loader = make_loader(user_train_ds, batch_size, args.num_workers,
+                                   shuffle=True, drop_last=True, reused=True)
+        val_loaders_dict = {genre: make_loader(user_val_ds, batch_size, args.num_workers,
+                                               reused=True)}
 
-        model_user = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
-        pretrained_path = pretrained_model_dict[genre]
-        if pretrained_path is not None and os.path.exists(pretrained_path):
-            try:
-                state = torch.load(pretrained_path, map_location=device)
-                incompatible = model_user.load_state_dict(state, strict=False)
-                if incompatible.unexpected_keys:
-                    print(f"[load_state_dict] Ignored unexpected keys: {incompatible.unexpected_keys}")
-                print(f"Loaded PIAA weights from {pretrained_path}")
-            except Exception as e:
-                raise RuntimeError(f"Error: Failed to load model weights from {pretrained_path}: {e}")
+        if reuse_model:
+            # Every parameter and buffer is covered by the checkpoint, so reloading
+            # it returns the model to exactly the state a fresh build would produce.
+            model_user.load_state_dict(base_state, strict=False)
         else:
-            raise FileNotFoundError(f"Error: Pretrained model file not found: {pretrained_path}")
+            model_user = build_piaa_model(num_bins, num_attr, num_pt, genres, backbone_dict, args).to(device)
+            model_user.load_state_dict(base_state, strict=False)
 
         model_user.freeze_backbone()
         if uid == unique_user_ids[0]:
@@ -343,13 +378,13 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
         # epoch 0 前に pretrain 重みを保存しておく:
         # val_ccc が一度も改善しない (NaN 等) ユーザーでも .pth が必ず存在し、
         # inference 時の "best model not found" によるユーザー欠損を防ぐ。
-        safe_save_checkpoint(model_user.state_dict(), best_model_path)
+        safe_save_checkpoint(trainable_state(model_user.state_dict()), best_model_path)
 
         for epoch in range(args.num_epochs):
             if tracker is not None:
                 tracker.start_epoch(epoch)
 
-            train_loss, _, _ = _train_one_epoch_piaa(model_user, train_loader, optimizer_user, scaler, device, args, genre, epoch=epoch, tracker=tracker)
+            train_loss = _train_one_epoch_piaa(model_user, train_loader, optimizer_user, scaler, device, args, genre, epoch=epoch, tracker=tracker)
             genre_metrics, val_mae = evaluate_piaa(model_user, val_loaders_dict, device, epoch=epoch, phase_name="Val")
 
             if tracker is not None:
@@ -369,7 +404,7 @@ def trainer_finetune(datasets_dict, args, device, dirname, experiment_name, back
             if val_ccc > best_val_ccc:
                 best_val_ccc = val_ccc
                 patience = 0
-                safe_save_checkpoint(model_user.state_dict(), best_model_path)
+                safe_save_checkpoint(trainable_state(model_user.state_dict()), best_model_path)
             else:
                 patience += 1
                 if patience >= args.max_patience_epochs:

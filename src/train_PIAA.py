@@ -1,11 +1,13 @@
 import os
 import copy
+from datetime import datetime
 from .argflags import parse_arguments, model_dir, MODELS_ROOT, get_device
 from .data import load_data, build_global_encoders
 from .train_common import discover_folds
 from .methods import source_only
 from .inference import inference_finetune, evaluate_pretrain_on_val_piaa, inference_pretrain
 from .progress import ProgressTracker
+from .checkpoint_callback import wait_for_all_uploads
 
 num_attr = None  # Determined dynamically from dataset
 num_pt = None    # Determined dynamically from dataset
@@ -107,7 +109,8 @@ def run_main(args, tracker=None):
         source_only.trainer_finetune(
             datasets_dict_user, args, device, dirname, experiment_name, backbone_dict, pretrained_model_dict,
             num_attr, num_pt, tracker=tracker)
-        inference_finetune(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict)
+        inference_finetune(datasets_dict_user, args, device, dirname, experiment_name, backbone_dict,
+                           pretrained_model_dict=pretrained_model_dict)
         if not args.keep_finetune_pth:
             for pth_file in [f for f in os.listdir(dirname) if f.endswith('_finetune.pth')]:
                 os.remove(os.path.join(dirname, pth_file))
@@ -211,3 +214,5 @@ if __name__ == '__main__':
             else:
                 tracker.set_context(genre_idx=g_idx + 1, genre_name=source, fold_idx=1, fold_name=args_outer.dataset_ver)
                 run_main(args_outer, tracker=tracker)
+
+    wait_for_all_uploads()
