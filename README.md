@@ -162,6 +162,39 @@ python -m src.train_PIAA --genre art --dataset_ver v3_all \
 
 Result JSONs are saved to `reports/exp/{dataset_ver}/{genre}/`.
 
+### Loading the New Finetune Checkpoints for Inference
+
+New `*_finetune.pth` files contain only the per-user trainable delta (about
+7 MB), rather than a full copy of the frozen NIMA/CLIP tower. Inference must
+therefore load two matching files:
+
+1. the shared `*_pretrain.pth`; and
+2. the user's `*_finetune.pth` delta.
+
+They must have the same dataset fold, genre, and model type (ICI or MIR).
+`src.train_PIAA --piaa_mode PIAA_finetune` performs this reconstruction and
+test inference automatically after training. For inference without training,
+load the shared state first and the user delta second:
+
+```python
+base_state = torch.load(pretrain_path, map_location=device)
+user_state = torch.load(user_delta_path, map_location=device)
+
+if is_trainable_only_state(user_state):
+    model.load_state_dict(base_state, strict=False)
+    model.load_state_dict(user_state, strict=False)
+else:
+    # Old full finetune checkpoints remain supported.
+    model.load_state_dict(user_state)
+
+model.eval()
+with torch.no_grad():
+    prediction = model(image, traits.float(), qip.float(), genre)
+```
+
+See [`PROJECT_UPDATE.md`](PROJECT_UPDATE.md#14-using-the-new-finetune-inference-path)
+for a complete model-construction example, input shapes, and operational notes.
+
 ---
 
 ## Result Aggregation

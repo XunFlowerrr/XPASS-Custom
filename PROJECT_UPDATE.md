@@ -257,6 +257,136 @@ End-of-fold sync ถูกจำกัดตาม `(fold, model, genre)` เพ
 - ใช้ Google Drive เป็นศูนย์รวม report และ checkpoint
 - ใช้ report JSON เป็น resume marker
 
+## 14. Using the New Finetune Inference Path
+
+Finetune checkpoint รูปแบบใหม่เป็น **trainable delta checkpoint** ไม่ใช่
+full model checkpoint ดังนั้นการนำไป inference ต้องมีไฟล์สองส่วนที่ตรงกัน:
+
+1. Shared pretrain checkpoint: `*_{ICI|MIR}_*_pretrain.pth`
+2. Per-user delta checkpoint: `*_{ICI|MIR}_user_<uid>_*_finetune.pth`
+
+ทั้งสองไฟล์ต้องมาจาก fold, genre และ model type เดียวกัน เช่น delta ของ
+`v4_fold3/art/ICI/user_131` ต้องประกอบกับ ICI pretrain ของ
+`v4_fold3/art` เท่านั้น ห้ามใช้ pretrain ข้าม fold, genre หรือข้าม ICI/MIR
+
+### 14.1 Training Followed by Automatic Inference
+
+`src.train_PIAA` เรียก test inference ให้อัตโนมัติหลัง finetuning เสร็จ
+ไม่ต้องสั่ง inference เพิ่ม ตัวอย่างสำหรับ ICI:
+
+```bash
+uv run python -m src.train_PIAA \
+  --genre art \
+  --dataset_ver v4_fold3 \
+  --model_type ICI \
+  --piaa_mode PIAA_finetune \
+  --batch_size 16 \
+  --root_dir Dataset \
+  --samples_root Dataset/sample/art_extracted \
+  --keep_finetune_pth
+```
+
+สำหรับ MIR เปลี่ยนเป็น `--model_type MIR`
+
+ระบบจะทำตามลำดับต่อไปนี้:
+
+1. ค้นหา `*_pretrain.pth` ที่ตรงกับ fold, genre และ model type
+2. Finetune โมเดลแยกตาม user และบันทึกเฉพาะ trainable delta
+3. สร้าง PIAA model สำหรับ inference
+4. โหลด frozen/shared state จาก pretrain checkpoint
+5. โหลด per-user delta ทับด้วย `strict=False`
+6. ประเมิน test split และเขียน report JSON ลง
+   `reports/exp/<dataset_ver>/<genre>/`
+
+`--keep_finetune_pth` ใช้เมื่อจำเป็นต้องเก็บ per-user delta สำหรับ inference
+ในอนาคต หากไม่ใส่ flag นี้ `train_PIAA` จะลบ local finetune checkpoints
+หลัง inference เสร็จ แม้ report JSON จะยังคงอยู่
+
+### 14.2 Loading One User Without Finetuning Again
+
+CLI `src.train_PIAA --piaa_mode PIAA_finetune` ยังเป็น train-then-infer workflow
+ไม่ใช่ inference-only command หากต้องการโหลด checkpoint ที่มีอยู่แล้วเพื่อ
+predict โดยไม่เทรนซ้ำ ให้ประกอบ base state กับ user delta ดังนี้:
+
+```python
+from argparse import Namespace
+
+import torch
+
+from src.train_common import (
+    build_piaa_model,
+    is_trainable_only_state,
+    num_bins,
+)
+
+genre = "art"
+model_type = "ICI"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# XPASS v4 dimensions; derive these from the dataset for another schema.
+num_attr = 45   # QIP dimensions
+num_pt = 116    # personal-trait dimensions
+
+args = Namespace(model_type=model_type, dropout=0.1)
+model = build_piaa_model(
+    num_bins=num_bins,
+    num_attr=num_attr,
+    num_pt=num_pt,
+    genres=[genre],
+    backbone_dict={genre: "clip_vit_b16"},
+    args=args,
+).to(device)
+
+pretrain_path = (
+    "models_pth/v4_fold3/art/"
+    "art_ICI_Only_<timestamp>_pretrain.pth"
+)
+user_delta_path = (
+    "models_pth/v4_fold3/art/"
+    "art_ICI_user_131_Only_<timestamp>_finetune.pth"
+)
+
+base_state = torch.load(pretrain_path, map_location=device)
+user_state = torch.load(user_delta_path, map_location=device)
+
+if is_trainable_only_state(user_state):
+    # New format: shared frozen state + per-user trainable delta.
+    model.load_state_dict(base_state, strict=False)
+    model.load_state_dict(user_state, strict=False)
+else:
+    # Backward compatibility for old full finetune checkpoints.
+    model.load_state_dict(user_state)
+
+model.eval()
+
+# Inputs must use the same CLIP transform and XPASS encoders as training:
+# image  [B, 3, 224, 224]
+# traits [B, 116]
+# qip    [B, 45]
+with torch.no_grad():
+    prediction = model(
+        image.to(device),
+        traits.float().to(device),
+        qip.float().to(device),
+        genre,
+    )
+```
+
+หาก `user_state` เป็น checkpoint เก่าแบบ full model ระบบจะโหลดไฟล์นั้นตรง ๆ
+เพื่อรักษา backward compatibility ส่วน checkpoint ใหม่ต้องมี pretrain file
+อยู่ด้วยเสมอ การย้ายหรือสำรองโมเดลจึงควรเก็บ pretrain checkpoint และ user
+delta checkpoints ของแต่ละ `(fold, genre, model type)` ไว้ด้วยกัน
+
+### 14.3 Re-running Test Inference for All Users
+
+ฟังก์ชัน `src.inference.inference_finetune(...)` รองรับ checkpoint ใหม่แล้ว
+โดยจะโหลด pretrain state ครั้งเดียวและนำ user delta แต่ละไฟล์มาทับก่อนประเมิน
+user นั้น นอกจากนี้ยังตรวจ checkpoint เก่าและโหลดแบบ full state ให้อัตโนมัติ
+
+ข้อควรระวังคือชื่อไฟล์ user checkpoint มี `experiment_name`/timestamp อยู่ในชื่อ
+ดังนั้น caller ต้องส่ง `experiment_name` ที่ตรงกับชุด checkpoint ที่ต้องการ
+อ่าน มิฉะนั้นระบบจะรายงานว่าไม่พบ best model ของ user นั้น
+
 ## Final Status
 
 ตรวจ Google Drive แล้วพบ report ครบทุกชุด:
